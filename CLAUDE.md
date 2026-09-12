@@ -114,9 +114,20 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
   works end to end. With the Stage tapping Ableton, `pancake probe-aggregate "Pancake Program"`
   read peaks ~1.0 while `"Pancake Mic"` read ~0.003 (no bleed); a live Discord *window*-share of the
   Stage got "green on both" — friends heard Ableton clearly, no echo. Stage renders into Program
-  (not Pancake Mic), has an app picker, and splits the shared mirror window from a separate Controls
-  window (both excluded from the capture). Adding Program did NOT churn the engine — it logged
-  `devices changed: same set, ignoring` (Program isn't graph-relevant).
+  (not Pancake Mic). Adding Program did NOT churn the engine — it logged `devices changed: same set,
+  ignoring` (Program isn't graph-relevant). (A later review fixed two *latent* driver bugs —
+  `kAudioPlugInPropertyTranslateUIDToDevice` omitted Device3, and a dead ControlList copy-paste;
+  both off the live path. Committed but not yet installed — `sudo make install-driver` at convenience.)
+- **Stage is a faceless, menu-driven helper, verified live (2026-09-12).** It's an `.accessory` app
+  (no Dock icon, no control panel): one chrome-free mirror window, **always parked off-desktop** at a
+  1pt on-screen sliver — invisible to you but still composited and listed in Discord's window picker
+  (Discord lists it by its `.titled` title; `canJoinAllSpaces` keeps it on Discord's current desktop;
+  it matches the display's aspect so there are no letterbox bars). You drive it entirely from the menu
+  bar's **Screen share** section (start/stop + audio-source picker), which writes
+  `~/.config/pancake/stage.json` (`StageConfig`); the Stage watches that file and reconciles its tap —
+  the file is the IPC, same pattern as the graph. A preferred app (Ableton) is auto-tapped the moment
+  it becomes tappable (a `kAudioHardwarePropertyProcessObjectList` listener), one-shot until you
+  choose otherwise. Quit it via the menu's **Stop screen share** or `make stop-stage`.
 - The AirPods' *own* hardware volume (elements 1+2, no element 0) is rewritten by the iPhone when it
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
   just makes everything quiet (found at 0.5). `swift tools/setvol.swift F0-04-E1-C9-6A-F8:output 1.0`
