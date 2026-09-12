@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import PancakeCore
+import ServiceManagement
 
 /// One row in the output list: a present device, or the device the graph wants that isn't here.
 struct MenuOutput: Identifiable, Hashable {
@@ -47,6 +48,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var stageRunning = false
     @Published private(set) var stageApps: [TappableApp] = []
     static let stageBundleID = "com.pancake.stage"
+
+    /// Whether the app is registered to launch at login (SMAppService).
+    @Published private(set) var launchAtLogin = false
 
     private let store = GraphStore()
     private var graph: Graph
@@ -93,6 +97,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.stageConfigFileChanged(cfg) }
         }
         observeStageLifecycle()
+        refreshLaunchAtLogin()
 
         engine.start()
         ensureMicrophoneAccess()
@@ -293,6 +298,26 @@ final class AppModel: ObservableObject {
     private func refreshStageState() {
         stageRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.stageBundleID }
         stageApps = tappableApps()
+    }
+
+    // MARK: Launch at login
+
+    func refreshLaunchAtLogin() {
+        launchAtLogin = (SMAppService.mainApp.status == .enabled)
+    }
+
+    func toggleLaunchAtLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            Log.warn("launch at login toggle failed: \(error.localizedDescription)")
+        }
+        refreshLaunchAtLogin()
+        Log.info("menu: launch at login \(launchAtLogin ? "on" : "off")")
     }
 
     func toggleOutputLock() {

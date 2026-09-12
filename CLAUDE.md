@@ -30,6 +30,8 @@ make test                  # swift test with the -F flags CLT needs for swift-te
 make driver                # driver/build/Pancake.driver
 sudo make install-driver   # needs a real terminal for the password; kills coreaudiod (launchd respawns it — kickstart is SIP-blocked)
 make app && make run-app   # build/Pancake.app; `make stop-app` quits it via AppleScript (SIGTERM would skip the hand-back)
+make install-app           # copy both apps → ~/Applications (stable paths); then menu → "Start at login"
+make stage && make run-stage  # build/PancakeStage.app (faceless screen-share helper); `make stop-stage` quits it
 tail -f ~/Library/Logs/pancake.log
 .build/debug/pancake status | devices [--all] | graph | set-output <name>
 .build/debug/pancake run [--output <name>] [--hub <name>] [--no-pin] [--no-follow] [--stats N] [--verbose]
@@ -140,9 +142,11 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
    exception to "pancake never writes a physical volume" — `DESIGN.md` § Gain.
 1. Bluetooth reconnect in anger: AirPods stolen by the phone, resume playback on the Mac, watch the log
    for "asking Bluetooth to reconnect" and whether they come back. May need the Bluetooth TCC prompt.
-2. Start at login: `SMAppService.mainApp.register()` needs the app in a stable place (`/Applications` or
-   `~/Applications`); add `make install-app`. Then retarget/delete the output half of `audio-defaults`
-   (MIGRATION.md §1) — pancake now does that job.
+2. ✅ **Start at login** — `make install-app` copies Pancake.app + PancakeStage.app to `~/Applications`
+   (stable paths, no sudo), and the menu's **Start at login** toggle registers the menu app via
+   `SMAppService.mainApp`. The Stage is *not* a login item — the menu launches it on demand, so the
+   screen isn't captured until you actually screen-share. Register from the `~/Applications` copy (run
+   that one, not a `build/` copy) so the login item points at the stable path.
 3. Discord: link `input(BuiltInMicrophoneDevice)` → `mic` and a source for Ableton → `mic` in the graph;
    Discord records `Pancake Mic`. Today that source can only be the whole hub (everything playing);
    per-app needs process taps.

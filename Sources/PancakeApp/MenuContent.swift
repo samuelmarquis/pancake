@@ -77,6 +77,14 @@ struct MenuContent: View {
             MenuRow(action: { model.rebuildRouting() }) { ActionLabel("Rebuild audio routing", "arrow.triangle.2.circlepath") }
             MenuRow(action: { model.openGraphFile() }) { ActionLabel("Edit graph file…", "doc.text") }
             MenuRow(action: { model.openLog() }) { ActionLabel("Show log", "list.bullet.rectangle") }
+            MenuRow(action: { model.toggleLaunchAtLogin() }) {
+                HStack(spacing: 10) {
+                    Image(systemName: model.launchAtLogin ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12)).frame(width: 20)
+                        .foregroundStyle(model.launchAtLogin ? Color.accentColor : Color.secondary)
+                    Text("Start at login").font(.system(size: 13))
+                }
+            }
 
             Divider().padding(.vertical, 2)
 
@@ -84,6 +92,7 @@ struct MenuContent: View {
         }
         .padding(8)
         .frame(width: 300)
+        .onAppear { model.refreshLaunchAtLogin() }
     }
 
     static func outputGlyph(_ item: MenuOutput) -> String {

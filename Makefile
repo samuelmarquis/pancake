@@ -12,7 +12,7 @@ STAGE := build/PancakeStage.app
 # ad-hoc ('-') if the identity isn't present, so the tree still builds on another machine.
 SIGN_ID := $(shell security find-identity -p codesigning 2>/dev/null | grep -q "Pancake Dev" && echo "Pancake Dev" || echo -)
 
-.PHONY: build release test driver install-driver uninstall-driver check-driver run app run-app stop-app stage run-stage stop-stage clean
+.PHONY: build release test driver install-driver uninstall-driver check-driver run app run-app stop-app install-app stage run-stage stop-stage clean
 
 build:            ## debug build of PancakeCore + the pancake CLI
 	swift build
@@ -52,6 +52,16 @@ run-app: app      ## launch the menu bar app (logs to ~/Library/Logs/pancake.log
 
 stop-app:         ## quit it cleanly (it hands the default output back to real hardware)
 	osascript -e 'tell application id "com.pancake.app" to quit' 2>/dev/null || true
+
+install-app: app stage  ## copy both apps to ~/Applications (stable paths for the login item + Stage launch)
+	mkdir -p "$(HOME)/Applications"
+	rm -rf "$(HOME)/Applications/Pancake.app" "$(HOME)/Applications/PancakeStage.app"
+	cp -R $(APP) "$(HOME)/Applications/Pancake.app"
+	cp -R $(STAGE) "$(HOME)/Applications/PancakeStage.app"
+	codesign --force --sign "$(SIGN_ID)" "$(HOME)/Applications/PancakeStage.app"
+	codesign --force --sign "$(SIGN_ID)" "$(HOME)/Applications/Pancake.app"
+	@echo "installed to ~/Applications. Quit any build/ copies, open ~/Applications/Pancake.app,"
+	@echo "then menu → 'Start at login'. The menu launches the Stage on demand."
 
 stage: release    ## assemble build/PancakeStage.app (desktop mirror for clean Discord screen-share)
 	rm -rf $(STAGE)
