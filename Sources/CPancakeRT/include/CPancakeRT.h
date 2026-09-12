@@ -16,10 +16,22 @@
 extern "C" {
 #endif
 
+/// Recorders: sink nodes that aren't devices. A route whose `out_buffer` has PK_REC_FLAG set
+/// targets recorder `out_buffer & ~PK_REC_FLAG` instead of an aggregate output stream — the IOProc
+/// mixes into that recorder's per-cycle scratch and, while armed, pushes the result into a lock-free
+/// ring the drain side reads with pk_recorder_read. Everything is preallocated at context creation,
+/// so arming/recording adds no allocation or locks to the IOProc.
+#define PK_MAX_RECORDERS      4u
+#define PK_REC_CHANNELS       2u          /* recorders are stereo (the mix caps at two channels) */
+#define PK_REC_FLAG           0x80000000u /* set on pk_route.out_buffer to mean "recorder index"  */
+#define PK_REC_RING_FRAMES    262144u     /* per-recorder ring, ~5.46 s @48k (power of two)        */
+#define PK_REC_MAX_CYCLE_FRAMES 8192u     /* scratch is sized for this many frames per IO cycle    */
+
 /// One mono connection inside an IO cycle:
 ///   out[out_buffer].channel[out_channel] += in[in_buffer].channel[in_channel] * gain
 /// Buffers are indices into the aggregate's input / output AudioBufferList; channels
-/// are interleaved within a buffer.
+/// are interleaved within a buffer. If `out_buffer & PK_REC_FLAG`, the destination is a recorder
+/// (see above) rather than an output stream.
 typedef struct pk_route {
     uint32_t in_buffer;
     uint32_t in_channel;
@@ -66,6 +78,24 @@ float       pk_context_input_peak(const pk_context* _Nonnull ctx, uint32_t buffe
 /// the routing matrix produced for that device. Proves we're feeding a device even if it's mute.
 float       pk_context_output_peak(const pk_context* _Nonnull ctx, uint32_t buffer);
 void        pk_context_get_stats(const pk_context* _Nonnull ctx, pk_stats* _Nonnull out);
+
+// MARK: - Recorders (RT-safe capture to a ring the drain side writes to disk)
+
+/// Mark a recorder slot in use (routes may target it). Off means the IOProc ignores it entirely.
+/// Safe to call from the engine while IO runs — it only flips an atomic.
+void        pk_recorder_set_active(pk_context* _Nonnull ctx, uint32_t index, int active);
+/// Begin capture on a slot: resets the ring cursors and arms it. Call while the drain side is not
+/// mid-read (the engine serializes this with start/stop of its writer).
+void        pk_recorder_start(pk_context* _Nonnull ctx, uint32_t index);
+/// Stop capture (the IOProc stops pushing; already-captured frames stay in the ring to be drained).
+void        pk_recorder_stop(pk_context* _Nonnull ctx, uint32_t index);
+/// Drain side: copy up to `max_frames` of interleaved stereo (PK_REC_CHANNELS) from the ring into
+/// `dst`, advancing the read cursor. Returns frames copied (0 if none available). Single consumer.
+uint32_t    pk_recorder_read(pk_context* _Nonnull ctx, uint32_t index, float* _Nonnull dst, uint32_t max_frames);
+/// Total frames the IOProc has captured on this slot since the last start (for elapsed time).
+uint64_t    pk_recorder_captured_frames(const pk_context* _Nonnull ctx, uint32_t index);
+/// Frames dropped because the drain side fell behind (should stay zero; a warning signal if not).
+uint64_t    pk_recorder_overrun_frames(const pk_context* _Nonnull ctx, uint32_t index);
 
 /// The IOProc. `inClientData` must be the pk_context*. Expects every stream in
 /// Float32 interleaved format (the HAL's default client format); the engine
