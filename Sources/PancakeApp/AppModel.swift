@@ -406,29 +406,38 @@ final class AppModel: ObservableObject {
         // Device and tap nodes are added through the palette before they can be wired, so they exist.
     }
 
-    func connect(from: Port, to: Port) {
+    /// Wire one bus between two nodes: replace every existing link between the pair with the given
+    /// channel pairs (L/R is fungible — the editor decides the mapping). One apply, so the engine
+    /// rebuilds at most once.
+    func wireBus(from: NodeID, to: NodeID, pairs: [(Int, Int)]) {
         var g = graph
-        ensureNode(&g, from.node)
-        ensureNode(&g, to.node)
-        g.connect(from, to)
+        ensureNode(&g, from)
+        ensureNode(&g, to)
+        g.links.removeAll { $0.from.node == from && $0.to.node == to }
+        for p in pairs { g.links.append(Link(from: Port(from, p.0), to: Port(to, p.1))) }
         applyEditedGraph(g)
-        Log.info("editor: connect \(from) → \(to)")
+        Log.info("editor: wire \(from) → \(to) (\(pairs.count) ch)")
     }
 
-    /// Remove one link. Deliberately does *not* prune the now-possibly-orphan node — disconnecting a
-    /// wire leaves the node on the canvas (pipewire-style); deleting a node is a separate action.
-    func disconnect(from: Port, to: Port) {
+    /// Remove the whole bus between two nodes. Deliberately does *not* prune the now-orphan nodes —
+    /// disconnecting leaves them on the canvas (pipewire-style); deleting a node is a separate action.
+    func disconnectBus(from: NodeID, to: NodeID) {
         var g = graph
-        g.links.removeAll { $0.from == from && $0.to == to }
+        g.links.removeAll { $0.from.node == from && $0.to.node == to }
         applyEditedGraph(g)
-        Log.info("editor: disconnect \(from) → \(to)")
+        Log.info("editor: disconnect bus \(from) → \(to)")
     }
 
-    func setGain(from: Port, to: Port, gain: Float) {
+    /// Set the gain on every channel link of a bus (they share one gain in the editor). Gain-only, so
+    /// the engine hot-swaps the matrix with no rebuild.
+    func setBusGain(from: NodeID, to: NodeID, gain: Float) {
         var g = graph
-        guard let i = g.links.firstIndex(where: { $0.from == from && $0.to == to }) else { return }
-        g.links[i].gain = gain
-        applyEditedGraph(g)
+        var changed = false
+        for i in g.links.indices where g.links[i].from.node == from && g.links[i].to.node == to {
+            g.links[i].gain = gain
+            changed = true
+        }
+        if changed { applyEditedGraph(g) }
     }
 
     func addOutputNode(_ d: AudioDevice) { addNode(.output(d.uid, label: d.name)) }

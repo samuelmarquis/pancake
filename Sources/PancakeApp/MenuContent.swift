@@ -97,8 +97,10 @@ struct MenuContent: View {
     }
 
     /// Open the routing window. We're an `.accessory` app (no Dock icon), so nudge ourselves to the
-    /// front or the window would open unfocused behind whatever's active.
+    /// front or the window would open unfocused behind whatever's active. The menu-bar popover is the
+    /// key window while the menu is open; close it first so it doesn't linger behind the window.
     private func showGraph() {
+        NSApp.keyWindow?.close()
         openWindow(id: "graph")
         NSApp.activate(ignoringOtherApps: true)
     }

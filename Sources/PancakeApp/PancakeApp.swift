@@ -22,7 +22,7 @@ struct PancakeApp: App {
         Window("Pancake Routing", id: "graph") {
             GraphEditorView(app: model)
         }
-        .defaultSize(width: 1000, height: 660)
+        .defaultSize(width: 820, height: 560)   // spawn at the minimum; grow if you want
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
     }

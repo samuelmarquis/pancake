@@ -2,12 +2,12 @@ import AppKit
 import PancakeCore
 import SwiftUI
 
-
-/// The visual routing editor — a pipewire-style patchbay for the pancake graph. Sources (Pancake,
-/// inputs, app taps) sit on the left with output ports; sinks (outputs, Pancake Mic) on the right
-/// with input ports. Drag between ports to route, channel by channel. Edits apply to the running
-/// engine immediately and persist to graph.json; node positions persist separately to
-/// graph-layout.json so the IPC file stays clean.
+/// The visual routing editor — a pipewire-style patchbay. Sources (Pancake, inputs, app taps) on the
+/// left, sinks (outputs, Pancake Mic) on the right; drag between node ports to route. A connection is
+/// a whole stereo/mono bus (L/R fungible), drawn as bundled strands whose colour blends from the
+/// source node's hue to the sink's. Hover a wire for a gain knob; ⌫ removes the hovered wire/node.
+/// Edits apply to the running engine at once and persist to graph.json; node positions live in a
+/// separate graph-layout.json so the IPC file stays clean.
 struct GraphEditorView: View {
     @ObservedObject var app: AppModel
     @StateObject private var editor: GraphEditorModel
@@ -24,30 +24,14 @@ struct GraphEditorView: View {
                 .focusable()
                 .focusEffectDisabled()
                 .focused($canvasFocused)
-                .onKeyPress(keys: [.delete, .deleteForward]) { _ in
-                    editor.deleteSelection(); return .handled
-                }
+                .onKeyPress(keys: [.delete, .deleteForward]) { _ in editor.deleteHovered(); return .handled }
 
-            // Leading inset clears the hidden-title-bar traffic lights.
-            Toolbar(app: app, editor: editor)
-                .padding(.leading, 80)
-                .padding(.trailing, 14)
-                .padding(.top, 12)
-
-            VStack {
-                Spacer()
-                Inspector(app: app, editor: editor)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 12)
-            }
+            TopBar(app: app, editor: editor)
         }
-        .frame(minWidth: 760, minHeight: 500)
+        .frame(minWidth: 820, minHeight: 560)
         .background(WindowBackground())
-        .onAppear {
-            editor.syncNodes()
-            canvasFocused = true
-        }
-        .onChange(of: app.graph) { _, _ in editor.syncNodes() }
+        .onAppear { editor.sync(); canvasFocused = true }
+        .onChange(of: app.graph) { _, _ in editor.sync() }
     }
 }
 
@@ -64,63 +48,55 @@ private struct WindowBackground: View {
 
 // MARK: - Canvas
 
+/// A wire ready to draw: endpoints in screen space, the two endpoint colours to blend, strand count.
+private struct DrawEdge: Identifiable {
+    let id: String
+    let from: CGPoint
+    let to: CGPoint
+    let c0: Color
+    let c1: Color
+    let strands: Int
+    let live: Bool
+}
+
 private struct GraphCanvas: View {
     @ObservedObject var app: AppModel
     @ObservedObject var editor: GraphEditorModel
 
-    /// Links that the engine is actually running right now (device present, tap live).
-    private var liveLinks: Set<LinkRef> {
-        Set((app.effectiveGraph?.links ?? []).map { LinkRef(from: $0.from, to: $0.to) })
+    private var liveEdgeIDs: Set<String> {
+        var s = Set<String>()
+        for l in app.effectiveGraph?.links ?? [] { s.insert("\(l.from.node.rawValue)\u{2192}\(l.to.node.rawValue)") }
+        return s
     }
 
     var body: some View {
+        let desc = editor.descByID
+        let live = liveEdgeIDs
+        let draws: [DrawEdge] = editor.edges.compactMap { e in
+            guard let (a, b) = editor.edgeEndpoints(e) else { return nil }
+            return DrawEdge(id: e.id,
+                            from: a.offset(editor.pan), to: b.offset(editor.pan),
+                            c0: desc[e.from].map { GraphPalette.color(for: $0.kind) } ?? .gray,
+                            c1: desc[e.to].map { GraphPalette.color(for: $0.kind) } ?? .gray,
+                            strands: e.strands, live: live.contains(e.id))
+        }
+
         GeometryReader { _ in
             ZStack(alignment: .topLeading) {
-                // Dotted grid + pan/clear-selection surface.
                 DotGrid(pan: editor.pan)
                     .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture()
-                            .onChanged { editor.panBy($0.translation) }
-                            .onEnded { _ in editor.endPan() }
-                    )
-                    .onTapGesture { editor.selection = .none }
+                    .gesture(DragGesture().onChanged { editor.panBy($0.translation) }.onEnded { _ in editor.endPan() })
 
-                wires
-                pendingWire
+                WiresCanvas(edges: draws, hovered: editor.hoveredEdge)
+
+                // Order matters: knobs sit above nodes (grabbable over a card), but ports sit above
+                // knobs so a drag that starts on a port always begins a connection.
                 nodeCards
+                edgeKnobs
                 portDots
+                pendingWire
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    // Existing links.
-    private var wires: some View {
-        let live = liveLinks
-        let desc = editor.descByID
-        return ForEach(app.graph.links, id: \.self) { link in
-            if let a = editor.portCenter(link.from.node, link.from.channel),
-               let b = editor.portCenter(link.to.node, link.to.channel) {
-                let from = a.offset(editor.pan), to = b.offset(editor.pan)
-                let color = desc[link.from.node].map { GraphPalette.color(for: $0.kind) } ?? .accentColor
-                let isLive = live.contains(LinkRef(from: link.from, to: link.to))
-                let selected = editor.selection == .link(LinkRef(from: link.from, to: link.to))
-                Wire(from: from, to: to, color: color, live: isLive, selected: selected, gain: link.gain) {
-                    editor.selection = .link(LinkRef(from: link.from, to: link.to))
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var pendingWire: some View {
-        if let p = editor.pending {
-            let from = (p.fromIsSource ? p.start : p.current).offset(editor.pan)
-            let to = (p.fromIsSource ? p.current : p.start).offset(editor.pan)
-            WireShape(from: from, to: to)
-                .stroke(Color.accentColor.opacity(0.9),
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [2, 6]))
-                .allowsHitTesting(false)
         }
     }
 
@@ -128,12 +104,13 @@ private struct GraphCanvas: View {
         ForEach(editor.gnodes) { node in
             if let origin = editor.positions[node.id] {
                 let center = CGPoint(x: origin.x + GraphGeom.nodeWidth / 2,
-                                     y: origin.y + node.height / 2).offset(editor.pan)
+                                     y: origin.y + GraphGeom.nodeHeight / 2).offset(editor.pan)
                 NodeCard(node: node,
-                         selected: editor.selection == .node(node.id))
-                    .frame(width: GraphGeom.nodeWidth, height: node.height)
+                         hovered: editor.hoveredNode == node.id,
+                         onRemove: { editor.removeNode(node.id) })
+                    .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight)
                     .position(center)
-                    .onTapGesture { editor.selection = .node(node.id) }
+                    .onHover { editor.hoveredNode = $0 ? node.id : (editor.hoveredNode == node.id ? nil : editor.hoveredNode) }
                     .gesture(
                         DragGesture(minimumDistance: 3)
                             .onChanged { editor.dragNode(node.id, translation: $0.translation) }
@@ -145,11 +122,28 @@ private struct GraphCanvas: View {
 
     private var portDots: some View {
         ForEach(editor.gnodes) { node in
-            ForEach(0..<node.channels, id: \.self) { ch in
-                if let c = editor.portCenter(node.id, ch) {
-                    PortDot(editor: editor, node: node, channel: ch, model: c)
-                }
+            if let c = editor.portCenter(node.id) {
+                PortDot(editor: editor, node: node, model: c)
             }
+        }
+    }
+
+    private var edgeKnobs: some View {
+        ForEach(editor.edges) { edge in
+            if let (a, b) = editor.edgeEndpoints(edge) {
+                EdgeInteractor(editor: editor, edge: edge,
+                               from: a.offset(editor.pan), to: b.offset(editor.pan))
+            }
+        }
+    }
+
+    @ViewBuilder private var pendingWire: some View {
+        if let p = editor.pending {
+            let from = (p.fromIsSource ? p.start : p.current).offset(editor.pan)
+            let to = (p.fromIsSource ? p.current : p.start).offset(editor.pan)
+            WireShape(from: from, to: to)
+                .stroke(Color.accentColor.opacity(0.9), style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [2, 7]))
+                .allowsHitTesting(false)
         }
     }
 }
@@ -175,81 +169,126 @@ private struct DotGrid: View {
     }
 }
 
-// MARK: - Wire
+// MARK: - Wires (one Canvas, colour-blended, bundled strands)
+
+private struct WiresCanvas: View {
+    let edges: [DrawEdge]
+    let hovered: String?
+
+    var body: some View {
+        Canvas { ctx, _ in
+            for e in edges {
+                let hot = hovered == e.id
+                let offsets: [CGFloat] = e.strands >= 2 ? [-2.6, 2.6] : [0]
+                let shading = GraphicsContext.Shading.linearGradient(
+                    Gradient(colors: [e.c0, e.c1]), startPoint: e.from, endPoint: e.to)
+                let style = StrokeStyle(lineWidth: hot ? 3.4 : 2.4, lineCap: .round, dash: e.live ? [] : [5, 6])
+                ctx.opacity = e.live ? 1 : 0.5
+                for off in offsets {
+                    ctx.stroke(bezier(from: CGPoint(x: e.from.x, y: e.from.y + off),
+                                      to: CGPoint(x: e.to.x, y: e.to.y + off)),
+                               with: shading, style: style)
+                }
+                ctx.opacity = 1
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private func bezier(from: CGPoint, to: CGPoint) -> Path {
+    var p = Path()
+    let dx = max(40, abs(to.x - from.x) * 0.5)
+    p.move(to: from)
+    p.addCurve(to: to, control1: CGPoint(x: from.x + dx, y: from.y), control2: CGPoint(x: to.x - dx, y: to.y))
+    return p
+}
+
+private func bezierMid(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
+    let dx = max(40, abs(to.x - from.x) * 0.5)
+    let c1 = CGPoint(x: from.x + dx, y: from.y), c2 = CGPoint(x: to.x - dx, y: to.y)
+    return CGPoint(x: 0.125 * from.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * to.x,
+                   y: 0.125 * from.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * to.y)
+}
 
 private struct WireShape: Shape {
     var from: CGPoint
     var to: CGPoint
+    func path(in rect: CGRect) -> Path { bezier(from: from, to: to) }
+}
+
+// MARK: - Edge interaction (hover hit area + gain knob)
+
+private struct EdgeInteractor: View {
+    @ObservedObject var editor: GraphEditorModel
+    let edge: BusEdge
+    let from: CGPoint
+    let to: CGPoint
+
+    private var mid: CGPoint { bezierMid(from, to) }
+    private var hot: Bool { editor.hoveredEdge == edge.id || editor.knobEdge == edge.id }
+
+    var body: some View {
+        ZStack {
+            // Hit region: fat stroke of the curve ∪ a disc at the midpoint, so moving onto the knob
+            // keeps the wire "hovered" and the knob doesn't flicker away.
+            EdgeHitShape(from: from, to: to, width: 18, knob: mid, knobRadius: 22)
+                .fill(Color.white.opacity(0.001))
+                .onHover { inside in
+                    if inside { editor.hoveredEdge = edge.id }
+                    else if editor.hoveredEdge == edge.id { editor.hoveredEdge = nil }
+                }
+
+            if hot {
+                Knob(gain: edge.gain)
+                    .position(mid)
+                    // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
+                    .gesture(
+                        DragGesture(minimumDistance: 3)
+                            .onChanged { v in
+                                if editor.knobEdge == nil { editor.beginKnob(edge) }
+                                editor.dragKnob(edge, translation: v.translation)
+                            }
+                            .onEnded { _ in editor.endKnob() }
+                    )
+                    .onTapGesture(count: 2) { editor.resetKnob(edge) }
+                    .help("Drag to set gain · double-click for unity")
+            }
+        }
+    }
+}
+
+private struct EdgeHitShape: Shape {
+    var from: CGPoint, to: CGPoint, width: CGFloat, knob: CGPoint, knobRadius: CGFloat
     func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let dx = max(36, abs(to.x - from.x) * 0.5)
-        p.move(to: from)
-        p.addCurve(to: to,
-                   control1: CGPoint(x: from.x + dx, y: from.y),
-                   control2: CGPoint(x: to.x - dx, y: to.y))
+        var p = bezier(from: from, to: to).strokedPath(StrokeStyle(lineWidth: width, lineCap: .round))
+        p.addEllipse(in: CGRect(x: knob.x - knobRadius, y: knob.y - knobRadius, width: knobRadius * 2, height: knobRadius * 2))
         return p
     }
 }
 
-/// The wire's *hit region*: the outline of a fat stroke of the curve, so only taps near the wire
-/// select it — the wire view itself fills the canvas, and without this its whole frame would be tappable.
-private struct WireHitShape: Shape {
-    var from: CGPoint
-    var to: CGPoint
-    var width: CGFloat
-    func path(in rect: CGRect) -> Path {
-        WireShape(from: from, to: to).path(in: rect)
-            .strokedPath(StrokeStyle(lineWidth: width, lineCap: .round))
-    }
-}
-
-private struct Wire: View {
-    let from: CGPoint
-    let to: CGPoint
-    let color: Color
-    let live: Bool
-    let selected: Bool
+private struct Knob: View {
     let gain: Float
-    let onSelect: () -> Void
-
     var body: some View {
-        let shape = WireShape(from: from, to: to)
+        let unity = abs(gain - 1) < 0.001
         ZStack {
-            if selected {
-                shape.stroke(.white, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                    .shadow(color: color.opacity(0.6), radius: 4)
-            }
-            shape.stroke(live ? color : color.opacity(0.45),
-                         style: StrokeStyle(lineWidth: selected ? 3 : 2.2,
-                                            lineCap: .round,
-                                            dash: live ? [] : [5, 6]))
-            if gain != 1 {
-                GainPill(gain: gain)
-                    .position(midpoint)
-            }
+            Circle().fill(.regularMaterial)
+            Circle().stroke(.primary.opacity(0.18), lineWidth: 1)
+            // Indicator tick, rotated by the current gain.
+            Capsule()
+                .fill(unity ? Color.secondary : Color.accentColor)
+                .frame(width: 2.5, height: 11)
+                .offset(y: -7)
+                .rotationEffect(.degrees(GainMath.angle(gain)))
+            Text(GainMath.label(gain))
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .offset(y: 10)
+                .foregroundStyle(.secondary)
         }
-        .contentShape(WireHitShape(from: from, to: to, width: 18))
-        .onTapGesture(perform: onSelect)
-    }
-
-    private var midpoint: CGPoint {
-        let dx = max(36, abs(to.x - from.x) * 0.5)
-        let c1 = CGPoint(x: from.x + dx, y: from.y)
-        let c2 = CGPoint(x: to.x - dx, y: to.y)
-        // Cubic Bézier at t = 0.5.
-        return CGPoint(x: 0.125 * from.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * to.x,
-                       y: 0.125 * from.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * to.y)
-    }
-}
-
-private struct GainPill: View {
-    let gain: Float
-    var body: some View {
-        Text(GainMath.label(gain))
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().stroke(.primary.opacity(0.12)))
+        .frame(width: 34, height: 34)
+        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+        .contentShape(Circle())
     }
 }
 
@@ -257,49 +296,20 @@ private struct GainPill: View {
 
 private struct NodeCard: View {
     let node: GNode
-    let selected: Bool
+    let hovered: Bool
+    let onRemove: () -> Void
 
     private var color: Color { GraphPalette.color(for: node.kind) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-                .frame(height: GraphGeom.headerHeight)
-            VStack(spacing: 0) {
-                ForEach(0..<node.channels, id: \.self) { ch in
-                    channelRow(ch)
-                        .frame(height: GraphGeom.rowHeight)
-                }
-            }
-            .padding(.top, GraphGeom.topPad)
-            .padding(.bottom, GraphGeom.bottomPad)
-        }
-        .frame(width: GraphGeom.nodeWidth)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous)
-                .stroke(selected ? color : Color.primary.opacity(0.10), lineWidth: selected ? 2 : 1)
-        )
-        .overlay(alignment: .top) {
-            RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous)
-                .fill(color.opacity(0.14))
-                .frame(height: GraphGeom.headerHeight)
-                .mask(alignment: .top) { Rectangle().frame(height: GraphGeom.headerHeight) }
-                .allowsHitTesting(false)
-        }
-        .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
-        .opacity(node.present ? 1 : 0.62)
-    }
-
-    private var header: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 10) {
             ZStack {
                 Circle().fill(color.opacity(0.9))
                 Image(systemName: NodeGlyph.name(for: node.kind, title: node.title))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
             }
-            .frame(width: 26, height: 26)
+            .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(node.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Text(node.present ? node.subtitle : "not connected")
@@ -309,18 +319,36 @@ private struct NodeCard: View {
             }
             Spacer(minLength: 2)
         }
-        .padding(.horizontal, 11)
-    }
-
-    private func channelRow(_ ch: Int) -> some View {
-        HStack {
-            if node.isSource { Spacer() }
-            Text(ChannelName.label(ch, of: node.channels))
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-            if !node.isSource { Spacer() }
+        .padding(.horizontal, 12)
+        .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous)
+                .stroke(hovered ? color : Color.primary.opacity(0.10), lineWidth: hovered ? 1.8 : 1)
+        )
+        .overlay(alignment: .leading) {
+            // A slim colour bar on the port side marks the node's hue.
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 3.5, height: GraphGeom.nodeHeight - 18)
+                .padding(.leading, 4)
+                .opacity(0.9)
         }
-        .padding(.horizontal, 16)
+        .overlay(alignment: .topTrailing) {
+            if hovered && !node.isPermanent {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .secondary)
+                }
+                .buttonStyle(.plain)
+                .offset(x: 6, y: -6)
+                .help("Remove node")
+            }
+        }
+        .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
+        .opacity(node.present ? 1 : 0.62)
     }
 }
 
@@ -329,69 +357,62 @@ private struct NodeCard: View {
 private struct PortDot: View {
     @ObservedObject var editor: GraphEditorModel
     let node: GNode
-    let channel: Int
-    /// Port centre in model space (pan applied here for rendering).
-    let model: CGPoint
+    let model: CGPoint       // port centre in canvas/model space
 
     private var color: Color { GraphPalette.color(for: node.kind) }
 
     var body: some View {
         let screen = model.offset(editor.pan)
-        // A generous transparent square around the dot makes it easy to grab; the visible dot is centred.
         ZStack {
-            Circle().fill(color.opacity(0.22))
-                .frame(width: GraphGeom.portRadius * 3.4, height: GraphGeom.portRadius * 3.4)
-            Circle().fill(color)
-                .overlay(Circle().stroke(.background, lineWidth: 2))
+            Circle().fill(color.opacity(0.22)).frame(width: GraphGeom.portRadius * 3.2, height: GraphGeom.portRadius * 3.2)
+            Circle().fill(color).overlay(Circle().stroke(.background, lineWidth: 2))
                 .frame(width: GraphGeom.portRadius * 2, height: GraphGeom.portRadius * 2)
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 30, height: 30)
         .contentShape(Rectangle())
         .position(screen)
         .highPriorityGesture(
             DragGesture(minimumDistance: 2)
                 .onChanged { v in
-                    if editor.pending == nil {
-                        editor.beginConnection(from: Port(node.id, channel), isSource: node.isSource, at: model)
-                    }
+                    if editor.pending == nil { editor.beginConnection(from: node.id, isSource: node.isSource, at: model) }
                     editor.updateConnection(translation: v.translation)
                 }
                 .onEnded { _ in editor.endConnection() }
         )
-        .help("\(node.title) · \(ChannelName.label(channel, of: node.channels))")
+        .help(node.isSource ? "Output — drag to a sink" : "Input — drag to a source")
     }
 }
 
-// MARK: - Toolbar
+// MARK: - Top bar (flush with the traffic lights)
 
-private struct Toolbar: View {
+private struct TopBar: View {
     @ObservedObject var app: AppModel
     @ObservedObject var editor: GraphEditorModel
 
     var body: some View {
         HStack(spacing: 10) {
-            Label("Routing", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                .font(.system(size: 13, weight: .semibold))
-                .labelStyle(.titleAndIcon)
+            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                .foregroundStyle(.secondary)
+            Text("Routing").font(.system(size: 13, weight: .semibold))
 
-            Divider().frame(height: 18)
+            Divider().frame(height: 16)
 
             AddMenu(app: app, editor: editor)
-
             Button { editor.autoArrange() } label: { Label("Tidy", systemImage: "rectangle.3.offgrid") }
                 .glassButton()
             Button { editor.resetView() } label: { Label("Recenter", systemImage: "scope") }
                 .glassButton()
 
             Spacer()
-
             Legend()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().stroke(.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .controlSize(.small)
+        .padding(.leading, 82)
+        .padding(.trailing, 14)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial)
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(.primary.opacity(0.08)), alignment: .bottom)
     }
 }
 
@@ -411,24 +432,14 @@ private struct AddMenu: View {
                 Text("Everything here is already on the canvas")
             }
             if !outs.isEmpty {
-                Section("Output devices") {
-                    ForEach(outs, id: \.uid) { d in
-                        Button(d.name) { app.addOutputNode(d) }
-                    }
-                }
+                Section("Output devices") { ForEach(outs, id: \.uid) { d in Button(d.name) { app.addOutputNode(d) } } }
             }
             if !ins.isEmpty {
-                Section("Input devices") {
-                    ForEach(ins, id: \.uid) { d in
-                        Button(d.name) { app.addInputNode(d) }
-                    }
-                }
+                Section("Input devices") { ForEach(ins, id: \.uid) { d in Button(d.name) { app.addInputNode(d) } } }
             }
             if !apps.isEmpty {
-                Section("App audio (taps)") {
-                    ForEach(apps, id: \.bundleID) { a in
-                        Button(a.name + (a.isRunningOutput ? "  ●" : "")) { app.addTapNode(a) }
-                    }
+                Section("App audio (process taps)") {
+                    ForEach(apps, id: \.bundleID) { a in Button(a.name + (a.isRunningOutput ? "  ●" : "")) { app.addTapNode(a) } }
                 }
             }
         } label: {
@@ -463,133 +474,7 @@ private struct Legend: View {
     }
 }
 
-// MARK: - Inspector
-
-private struct Inspector: View {
-    @ObservedObject var app: AppModel
-    @ObservedObject var editor: GraphEditorModel
-
-    var body: some View {
-        Group {
-            switch editor.selection {
-            case .link(let ref): LinkInspector(app: app, editor: editor, ref: ref)
-            case .node(let id): NodeInspector(app: app, editor: editor, id: id)
-            case .none: HintBar()
-            }
-        }
-        .frame(maxWidth: 520)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(0.14), radius: 10, y: 3)
-    }
-}
-
-private struct HintBar: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "hand.draw").foregroundStyle(.secondary)
-            Text("Drag from a port to another to route it. Select a wire to set its gain or remove it.")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-        }
-    }
-}
-
-private struct LinkInspector: View {
-    @ObservedObject var app: AppModel
-    @ObservedObject var editor: GraphEditorModel
-    let ref: LinkRef
-
-    private var gain: Float { app.graph.links.first { $0.from == ref.from && $0.to == ref.to }?.gain ?? 1 }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(endpointName(ref.from.node)).fontWeight(.semibold)
-                Text(ChannelName.label(ref.from.channel, of: channels(ref.from.node))).foregroundStyle(.secondary)
-                Image(systemName: "arrow.right").font(.system(size: 10)).foregroundStyle(.secondary)
-                Text(endpointName(ref.to.node)).fontWeight(.semibold)
-                Text(ChannelName.label(ref.to.channel, of: channels(ref.to.node))).foregroundStyle(.secondary)
-                Spacer()
-            }
-            .font(.system(size: 13)).lineLimit(1)
-
-            HStack(spacing: 10) {
-                Image(systemName: "slider.horizontal.3").foregroundStyle(.secondary)
-                Slider(value: Binding(
-                    get: { GainMath.dB(gain) },
-                    set: { editor.setSelectedGain(GainMath.linear($0)) }
-                ), in: -48...12)
-                Text(GainMath.label(gain))
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 58, alignment: .trailing)
-                Button("Unity") { editor.setSelectedGain(1) }
-                    .controlSize(.small)
-                    .glassButton()
-                Button(role: .destructive) { editor.disconnectSelected() } label: {
-                    Label("Disconnect", systemImage: "scissors")
-                }
-                .controlSize(.small)
-                .glassButton()
-            }
-        }
-    }
-
-    private func endpointName(_ id: NodeID) -> String { editor.descByID[id]?.title ?? id.rawValue }
-    private func channels(_ id: NodeID) -> Int { editor.descByID[id]?.channels ?? 2 }
-}
-
-private struct NodeInspector: View {
-    @ObservedObject var app: AppModel
-    @ObservedObject var editor: GraphEditorModel
-    let id: NodeID
-
-    var body: some View {
-        let node = editor.descByID[id]
-        HStack(spacing: 10) {
-            if let node {
-                Image(systemName: NodeGlyph.name(for: node.kind, title: node.title))
-                    .foregroundStyle(GraphPalette.color(for: node.kind))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(node.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text("\(node.subtitle) · \(node.channels) ch · \(node.present ? "connected" : "not connected")")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer()
-            if let node, !node.isPermanent {
-                Button(role: .destructive) { editor.deleteSelection() } label: {
-                    Label("Remove", systemImage: "trash")
-                }
-                .controlSize(.small)
-                .glassButton()
-            } else {
-                Text("fixed bus").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-// MARK: - Small helpers
-
-private enum GainMath {
-    static func dB(_ g: Float) -> Double { g <= 0.0016 ? -48 : Double(20 * log10f(g)) }
-    static func linear(_ db: Double) -> Float { db <= -48 ? 0 : powf(10, Float(db) / 20) }
-    static func label(_ g: Float) -> String {
-        if g == 1 { return "0.0 dB" }
-        if g <= 0.0016 { return "−∞ dB" }
-        return String(format: "%+.1f dB", 20 * log10f(g))
-    }
-}
-
-private enum ChannelName {
-    static func label(_ ch: Int, of total: Int) -> String {
-        if total <= 2 { return ch == 0 ? "L" : "R" }
-        return "\(ch + 1)"
-    }
-}
+// MARK: - Glyphs + small helpers
 
 private enum NodeGlyph {
     static func name(for kind: NodeKind, title: String) -> String {
@@ -601,7 +486,7 @@ private enum NodeGlyph {
         case .output:
             let n = title.lowercased()
             if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
-            if n.contains("airpod") || n.contains("âãåä") { return "airpodspro" }
+            if n.contains("airpod") { return "airpodspro" }
             if n.contains("display") || n.contains("studio") || n.contains("xdr") { return "display" }
             return "hifispeaker.fill"
         }
