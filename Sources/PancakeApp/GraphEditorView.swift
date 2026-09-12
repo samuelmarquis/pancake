@@ -93,10 +93,12 @@ private struct GraphCanvas: View {
                 WiresCanvas(edges: draws, hovered: editor.hoveredEdge)
 
                 // Order matters: knobs sit above nodes (grabbable over a card), but ports sit above
-                // knobs so a drag that starts on a port always begins a connection.
+                // knobs so a drag that starts on a port always begins a connection. Delete bubbles sit
+                // on top so they're always clickable.
                 nodeCards
                 edgeKnobs
                 portDots
+                deleteBubbles
                 pendingWire
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -108,12 +110,10 @@ private struct GraphCanvas: View {
             if let origin = editor.positions[node.id] {
                 let center = CGPoint(x: origin.x + GraphGeom.nodeWidth / 2,
                                      y: origin.y + GraphGeom.nodeHeight / 2).offset(editor.pan)
-                NodeCard(node: node,
-                         hovered: editor.hoveredNode == node.id,
-                         onRemove: { editor.removeNode(node.id) })
+                NodeCard(node: node, hovered: editor.hoveredNode == node.id)
                     .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight)
                     .position(center)
-                    .onHover { editor.hoveredNode = $0 ? node.id : (editor.hoveredNode == node.id ? nil : editor.hoveredNode) }
+                    .onHover { $0 ? editor.hoverNode(node.id) : editor.unhoverNode(node.id) }
                     .gesture(
                         DragGesture(minimumDistance: 3)
                             .onChanged { editor.dragNode(node.id, translation: $0.translation) }
@@ -127,6 +127,17 @@ private struct GraphCanvas: View {
         ForEach(editor.gnodes) { node in
             if let c = editor.portCenter(node.id) {
                 PortDot(editor: editor, node: node, model: c)
+            }
+        }
+    }
+
+    /// The iOS-style floating delete bubble at a hovered node's top-left corner.
+    private var deleteBubbles: some View {
+        ForEach(editor.gnodes) { node in
+            if editor.hoveredNode == node.id, !node.isPermanent, let origin = editor.positions[node.id] {
+                DeleteBubble(onRemove: { editor.removeNode(node.id) })
+                    .position(CGPoint(x: origin.x, y: origin.y).offset(editor.pan))
+                    .onHover { $0 ? editor.hoverNode(node.id) : editor.unhoverNode(node.id) }
             }
         }
     }
@@ -235,8 +246,8 @@ private struct EdgeInteractor: View {
         ZStack {
             // Hit region: fat stroke of the curve ∪ a disc at the midpoint, so moving onto the knob
             // keeps the wire "hovered" and the knob doesn't flicker away.
-            EdgeHitShape(from: from, to: to, width: 18, knob: mid, knobRadius: 22)
-                .fill(Color.white.opacity(0.001))
+            Color.clear
+                .contentShape(EdgeHitShape(from: from, to: to, width: 20, knob: mid, knobRadius: 24))
                 .onHover { inside in
                     if inside { editor.hoveredEdge = edge.id }
                     else if editor.hoveredEdge == edge.id { editor.hoveredEdge = nil }
@@ -321,7 +332,6 @@ private struct StageBadge: View {
 private struct NodeCard: View {
     let node: GNode
     let hovered: Bool
-    let onRemove: () -> Void
 
     private var color: Color { GraphPalette.color(for: node.kind) }
 
@@ -358,21 +368,27 @@ private struct NodeCard: View {
                 .padding(.leading, 4)
                 .opacity(0.9)
         }
-        .overlay(alignment: .topTrailing) {
-            if hovered && !node.isPermanent {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, .secondary)
-                }
-                .buttonStyle(.plain)
-                .offset(x: 6, y: -6)
-                .help("Remove node")
-            }
-        }
         .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
         .opacity(node.present ? 1 : 0.62)
+    }
+}
+
+/// Floating delete affordance à la iOS home-screen jiggle (minus the jiggle): a small dark bubble
+/// with a ✕, sat on the node's corner. Lives in a top layer so it's always clickable.
+private struct DeleteBubble: View {
+    let onRemove: () -> Void
+    var body: some View {
+        Button(action: onRemove) {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 19, height: 19)
+                .background(Circle().fill(Color(white: 0.25)))
+                .overlay(Circle().stroke(.white.opacity(0.85), lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+        }
+        .buttonStyle(.plain)
+        .help("Remove node")
     }
 }
 
@@ -431,9 +447,9 @@ private struct TopBar: View {
             Legend()
         }
         .controlSize(.small)
-        .padding(.leading, 82)
+        .padding(.leading, 82)   // clear the traffic lights
         .padding(.trailing, 14)
-        .padding(.vertical, 7)
+        .padding(.vertical, 3)   // short enough to sit in the title-bar band, flush with the lights
         .frame(maxWidth: .infinity)
         .background(.regularMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(.primary.opacity(0.08)), alignment: .bottom)

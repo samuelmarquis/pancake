@@ -146,6 +146,7 @@ final class GraphEditorModel: ObservableObject {
     private var dragStart: [NodeID: CGPoint] = [:]
     private var panStart: CGSize?
     private var knobGainStart: Float?
+    private var hoverClear: DispatchWorkItem?
 
     init(app: AppModel) {
         self.app = app
@@ -332,6 +333,16 @@ final class GraphEditorModel: ObservableObject {
     }
     func endPan() { panStart = nil }
     func resetView() { pan = .zero }
+
+    // MARK: Node hover (sticky, so the floating delete bubble doesn't vanish as you reach for it)
+
+    func hoverNode(_ id: NodeID) { hoverClear?.cancel(); hoveredNode = id }
+    func unhoverNode(_ id: NodeID) {
+        hoverClear?.cancel()
+        let work = DispatchWorkItem { [weak self] in if self?.hoveredNode == id { self?.hoveredNode = nil } }
+        hoverClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
 
     // MARK: Connecting
 
