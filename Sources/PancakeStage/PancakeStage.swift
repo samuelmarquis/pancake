@@ -45,6 +45,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Our own windows, excluded so we neither mirror ourselves (recursion) nor show the controls.
     private let excludeWindowIDs: Set<CGWindowID>
     var onStatus: ((String) -> Void)?
+    /// The captured display's size in points, so the mirror window can match its aspect ratio.
+    var onDisplaySize: ((CGSize) -> Void)?
 
     init(view: MirrorView, excludeWindowIDs: Set<CGWindowID>) {
         self.view = view
@@ -62,6 +64,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let display = content.displays.first else {
                 await status("no display found"); return
             }
+            let dsize = CGSize(width: display.width, height: display.height)
+            DispatchQueue.main.async { [weak self] in self?.onDisplaySize?(dsize) }
             // Exclude our own windows so we don't capture ourselves (infinite mirror) or the controls.
             let mine = content.windows.filter { excludeWindowIDs.contains($0.windowID) }
             let filter = SCContentFilter(display: display, excludingWindows: mine)
@@ -173,6 +177,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                          CGWindowID(controlsWindow.windowNumber)]
         capture = Capture(view: mirrorWindow.contentView as! MirrorView, excludeWindowIDs: excluded)
         capture.onStatus = { [weak self] s in self?.videoLabel.stringValue = "video: \(s)" }
+        capture.onDisplaySize = { [weak self] size in self?.matchMirrorAspect(size) }
         capture.start()
 
         // Tapping an app is "audio capture" to TCC → Microphone permission (same gate the engine's
@@ -200,15 +205,38 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Windows
 
     private func buildMirrorWindow() {
-        let mirror = MirrorView(frame: NSRect(x: 0, y: 0, width: 960, height: 600))
+        let mirror = MirrorView(frame: NSRect(x: 0, y: 0, width: 1000, height: 625))
         mirrorWindow = NSWindow(contentRect: mirror.bounds,
-                                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                 backing: .buffered, defer: false)
-        mirrorWindow.title = "Pancake Stage"
+        mirrorWindow.title = "Pancake Stage"                 // kept: Discord lists the window by title
+        // Chrome-free: no visible title text, no traffic lights, transparent title bar over full-size
+        // content, no drop shadow — it just looks like a stream. Still a normal titled window, so it
+        // stays in Discord's window picker.
+        mirrorWindow.titleVisibility = .hidden
+        mirrorWindow.titlebarAppearsTransparent = true
+        mirrorWindow.standardWindowButton(.closeButton)?.isHidden = true
+        mirrorWindow.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        mirrorWindow.standardWindowButton(.zoomButton)?.isHidden = true
+        mirrorWindow.hasShadow = false                       // kills the darkening in the corner when parked
+        mirrorWindow.isMovableByWindowBackground = true      // drag the picture itself to reposition
+        // Live on every Space, so it's always on whatever desktop Discord is on — no hunting.
+        mirrorWindow.collectionBehavior = [.canJoinAllSpaces]
         mirrorWindow.center()
         mirrorWindow.contentView = mirror
         mirrorWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Size the mirror to the display's exact aspect ratio so there are no letterbox bars.
+    private func matchMirrorAspect(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        mirrorWindow.contentAspectRatio = size
+        guard !mirrorHidden else { return }
+        let w: CGFloat = 1000
+        mirrorWindow.setContentSize(NSSize(width: w, height: (w * size.height / size.width).rounded()))
+        mirrorWindow.center()
+        lastVisibleFrame = mirrorWindow.frame
     }
 
     private func buildControlsWindow() {
