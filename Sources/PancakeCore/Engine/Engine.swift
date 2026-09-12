@@ -144,6 +144,8 @@ public final class Engine {
             monitor = nil
             let wasFeeding: String? = { if case .running(let info) = currentState { return info.effectiveGraph.hubOutputDeviceUIDs.first } else { return nil } }()
             let hubLevel = AudioDevice.find(uid: configuration.hubUID)?.outputVolumes()[0]
+            recordDrainTimer?.cancel(); recordDrainTimer = nil
+            closeAllRecordings()   // flush any in-progress files before IO stops
             teardown()
             destroyAllTaps()
             releaseAllVolumeHolds(leavingAt: hubLevel)
@@ -256,6 +258,90 @@ public final class Engine {
         return s
     }
 
+    // MARK: - Recording (queue only)
+
+    /// Begin recording everything wired into a `.recorder` node to `url` (a WAV). The node must be
+    /// in the running graph and under the recorder limit. Throws if the file can't be opened.
+    public func startRecording(node: NodeID, to url: URL) throws {
+        try queue.sync {
+            guard case .running(let info) = currentState else { throw RecordingError.notRunning }
+            guard let slot = recorderSlots[node] else { throw RecordingError.noSlot }
+            recordings[node]?.close()   // restart if already recording
+            let session = try RecordingSession(rt: rt, slot: UInt32(slot), url: url, sampleRate: info.sampleRate)
+            pk_recorder_start(rt, UInt32(slot))
+            recordings[node] = session
+            ensureDrainTimer()
+            Log.info("recording \(node) → \(url.path) (slot \(slot), \(Int(info.sampleRate))Hz)")
+        }
+    }
+
+    public func stopRecording(_ node: NodeID) { queue.sync { stopRecordingLocked(node) } }
+
+    public func isRecording(_ node: NodeID) -> Bool { queue.sync { recordings[node] != nil } }
+
+    /// Seconds captured so far on a node's recording (from the IOProc frame count), or nil.
+    public func recordingElapsed(_ node: NodeID) -> Double? {
+        queue.sync {
+            guard recordings[node] != nil, let slot = recorderSlots[node],
+                  case .running(let info) = currentState, info.sampleRate > 0 else { return nil }
+            return Double(pk_recorder_captured_frames(rt, UInt32(slot))) / info.sampleRate
+        }
+    }
+
+    private func stopRecordingLocked(_ node: NodeID) {
+        guard let session = recordings[node] else { return }
+        if let slot = recorderSlots[node] { pk_recorder_stop(rt, UInt32(slot)) }
+        session.close()
+        recordings[node] = nil
+        Log.info("stopped recording \(node) → \(session.url.path) (\(session.framesWritten) frames)")
+        if recordings.isEmpty { recordDrainTimer?.cancel(); recordDrainTimer = nil }
+    }
+
+    /// (Re)assign each recorder node in `graph` a stable pk_context slot, flip the active flags, and
+    /// stop any recording whose node has disappeared. Returns the node→slot map for the compiler.
+    @discardableResult
+    private func syncRecorderSlots(_ graph: Graph) -> [NodeID: Int] {
+        let ids = graph.nodes.compactMap { node -> NodeID? in
+            if case .recorder = node.kind { return node.id } else { return nil }
+        }
+        let want = Set(ids)
+        for node in recordings.keys where !want.contains(node) {
+            Log.info("recorder \(node): node gone from the graph; stopping recording")
+            stopRecordingLocked(node)
+        }
+        var map = recorderSlots.filter { want.contains($0.key) }   // keep existing assignments
+        var used = Set(map.values)
+        for id in ids where map[id] == nil {
+            guard let free = (0..<Int(PK_MAX_RECORDERS)).first(where: { !used.contains($0) }) else {
+                Log.warn("recorder \(id): no free slot (max \(PK_MAX_RECORDERS)); it won't capture")
+                continue
+            }
+            map[id] = free
+            used.insert(free)
+        }
+        for slot in 0..<Int(PK_MAX_RECORDERS) {
+            pk_recorder_set_active(rt, UInt32(slot), used.contains(slot) ? 1 : 0)
+        }
+        recorderSlots = map
+        return map
+    }
+
+    private func ensureDrainTimer() {
+        guard recordDrainTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            for (_, session) in self.recordings { session.drain() }
+        }
+        t.resume()
+        recordDrainTimer = t
+    }
+
+    private func closeAllRecordings() {
+        for node in Array(recordings.keys) { stopRecordingLocked(node) }
+    }
+
     // MARK: - Internals (queue only)
 
     private let queue = DispatchQueue(label: "com.pancake.engine", qos: .userInitiated)
@@ -282,6 +368,11 @@ public final class Engine {
     private var overloadListener: PropertyListener?
     /// Live process taps, keyed by bundle id. Created/destroyed on rebuild; reused across them.
     private var taps: [String: ProcessTap] = [:]
+    /// Recorder node id → its pk_context recorder slot, (re)assigned whenever the matrix compiles.
+    private var recorderSlots: [NodeID: Int] = [:]
+    /// Active recordings by node id, each draining its ring to a file. All touched only on `queue`.
+    private var recordings: [NodeID: RecordingSession] = [:]
+    private var recordDrainTimer: DispatchSourceTimer?
     /// Physical outputs whose hardware volume is held at unity: what to put back, and the
     /// listeners that re-assert unity if anything else writes it meanwhile.
     private var heldVolumes: [String: HeldVolume] = [:]
@@ -550,8 +641,8 @@ public final class Engine {
                     notes.append("refusing to tap \(bundleID): that's pancake itself — it would feed back. Dropping.")
                     g.remove(node.id)
                 }
-            case .hub, .mic:
-                break
+            case .hub, .mic, .recorder:
+                break   // hub/mic handled below; a recorder is a virtual sink with no device
             }
         }
         if g.node(Graph.micID) != nil, present[configuration.micUID] == nil {
@@ -630,7 +721,8 @@ public final class Engine {
            cur.subDevices == composition.subDevices, cur.taps == composition.taps,
            cur.mainSubDeviceUID == composition.mainSubDeviceUID,
            case .running(let info) = currentState {
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID)
+            let slots = syncRecorderSlots(graph)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
             compiled.warnings.forEach { Log.warn($0) }
             if let matrix = MatrixCompiler.makeMatrix(compiled.routes) {
                 let cycles = pk_context_cycles(rt)
@@ -676,7 +768,8 @@ public final class Engine {
             self.layout = layout
             Log.debug("layout: \(layout)")
 
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID)
+            let slots = syncRecorderSlots(graph)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
             compiled.warnings.forEach { Log.warn($0) }
             guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else {
                 throw ChannelLayout.ResolutionError(description: "matrix allocation failed")
@@ -709,7 +802,8 @@ public final class Engine {
         }
         let devices = AudioDevice.all(includeHidden: true)
         let (graph, _) = effectiveGraph(from: desiredGraph, devices: devices)
-        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID)
+        let slots = syncRecorderSlots(graph)
+        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
         compiled.warnings.forEach { Log.warn($0) }
         guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else { return }
         let cycles = pk_context_cycles(rt)

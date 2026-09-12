@@ -14,8 +14,11 @@ public enum MatrixCompiler {
         public var warnings: [String]
     }
 
-    /// `hubUID` / `micUID` say which sub-devices back the `.hub` and `.mic` nodes.
-    public static func compile(graph: Graph, layout: ChannelLayout, hubUID: String, micUID: String) -> Result {
+    /// `hubUID` / `micUID` say which sub-devices back the `.hub` and `.mic` nodes. `recorderSlots`
+    /// maps each `.recorder` node to its `pk_context` recorder index; those sinks route into the
+    /// recorder ring (out_buffer carries PK_REC_FLAG) rather than an aggregate output stream.
+    public static func compile(graph: Graph, layout: ChannelLayout, hubUID: String, micUID: String,
+                               recorderSlots: [NodeID: Int] = [:]) -> Result {
         var routes: [Route] = []
         var warnings: [String] = []
 
@@ -24,13 +27,17 @@ public enum MatrixCompiler {
             case .hub: return layout.inputs[hubUID]
             case .input(let uid): return layout.inputs[uid]
             case .tap(let bundleID): return layout.inputs[bundleID]   // taps are keyed by bundle id
-            case .mic, .output: return nil
+            case .mic, .output, .recorder: return nil
             }
         }
         func sinkSlots(_ node: Node) -> [ChannelLayout.Slot]? {
             switch node.kind {
             case .mic: return layout.outputs[micUID]
             case .output(let uid): return layout.outputs[uid]
+            case .recorder:
+                guard let slot = recorderSlots[node.id] else { return nil }   // unassigned → not routed
+                let base = Int(PK_REC_FLAG) | slot
+                return (0..<Int(PK_REC_CHANNELS)).map { ChannelLayout.Slot(buffer: base, channel: $0) }
             case .hub, .input, .tap: return nil
             }
         }

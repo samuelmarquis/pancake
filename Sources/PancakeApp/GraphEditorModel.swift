@@ -71,6 +71,7 @@ enum GraphPalette {
             case .input: return Color(red: 0.30, green: 0.62, blue: 0.98) // input blue
             case .output: return Color(red: 0.20, green: 0.78, blue: 0.66) // output teal
             case .tap: return Color(red: 0.38, green: 0.80, blue: 0.42)   // app green
+            case .recorder: return Color(red: 0.92, green: 0.30, blue: 0.33) // record red
             }
         }
     }
@@ -210,7 +211,7 @@ final class GraphEditorModel: ObservableObject {
         case .program: return 2
         case .graph(let k):
             switch k {
-            case .hub, .mic, .tap: return 2
+            case .hub, .mic, .tap, .recorder: return 2
             case .output(let uid):
                 if let d = app.device(forUID: uid) { return min(16, max(2, d.outputChannels)) }
                 return inferredChannels(id: id)
@@ -235,7 +236,7 @@ final class GraphEditorModel: ObservableObject {
         case .program: return true
         case .graph(let k):
             switch k {
-            case .hub, .mic: return true
+            case .hub, .mic, .recorder: return true
             case .output(let uid), .input(let uid): return app.device(forUID: uid) != nil
             case .tap(let b): return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == b }
             }
@@ -251,6 +252,7 @@ final class GraphEditorModel: ObservableObject {
             case .mic: return "Pancake Mic"
             case .input(let uid), .output(let uid): return label ?? uid
             case .tap(let b): return label ?? b
+            case .recorder: return label ?? "Recorder"
             }
         }
     }
@@ -266,6 +268,7 @@ final class GraphEditorModel: ObservableObject {
             case .input: return "hardware input"
             case .output: return "hardware output"
             case .tap: return "process tap"
+            case .recorder: return "capture to disk"
             }
         }
     }

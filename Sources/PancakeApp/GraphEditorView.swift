@@ -584,6 +584,7 @@ private enum NodeGlyph {
             case .mic: return "mic.fill"
             case .input: return "waveform"
             case .tap: return "app.fill"
+            case .recorder: return "recordingtape"
             case .output:
                 let n = title.lowercased()
                 if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }

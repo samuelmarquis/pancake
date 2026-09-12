@@ -26,11 +26,14 @@ public enum NodeKind: Hashable, Codable {
     case output(deviceUID: String)
     /// A per-process tap (macOS 14.2+). Source. Reserved for M5; the engine ignores it today.
     case tap(bundleID: String)
+    /// A capture-to-disk sink. Not a device — the engine mixes what's wired in into a ring and a
+    /// drain thread writes it to a file. `id` is a stable identifier so multiple recorders persist.
+    case recorder(id: String)
 
     public var isSource: Bool {
         switch self {
         case .hub, .input, .tap: return true
-        case .mic, .output: return false
+        case .mic, .output, .recorder: return false
         }
     }
     public var isSink: Bool { !isSource }
@@ -39,13 +42,13 @@ public enum NodeKind: Hashable, Codable {
     public var deviceUID: String? {
         switch self {
         case .input(let uid), .output(let uid): return uid
-        case .hub, .mic, .tap: return nil
+        case .hub, .mic, .tap, .recorder: return nil
         }
     }
 
     // Hand-written Codable so the config file reads as {"type":"output","device":"…"} rather
     // than Swift's synthesized {"output":{"deviceUID":"…"}}.
-    private enum CodingKeys: String, CodingKey { case type, device, bundle }
+    private enum CodingKeys: String, CodingKey { case type, device, bundle, id }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -56,6 +59,7 @@ public enum NodeKind: Hashable, Codable {
         case "input": self = .input(deviceUID: try c.decode(String.self, forKey: .device))
         case "output": self = .output(deviceUID: try c.decode(String.self, forKey: .device))
         case "tap": self = .tap(bundleID: try c.decode(String.self, forKey: .bundle))
+        case "recorder": self = .recorder(id: try c.decode(String.self, forKey: .id))
         default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown node type \(type)")
         }
     }
@@ -68,6 +72,7 @@ public enum NodeKind: Hashable, Codable {
         case .input(let uid): try c.encode("input", forKey: .type); try c.encode(uid, forKey: .device)
         case .output(let uid): try c.encode("output", forKey: .type); try c.encode(uid, forKey: .device)
         case .tap(let b): try c.encode("tap", forKey: .type); try c.encode(b, forKey: .bundle)
+        case .recorder(let id): try c.encode("recorder", forKey: .type); try c.encode(id, forKey: .id)
         }
     }
 }
@@ -89,6 +94,7 @@ public struct Node: Hashable, Codable, Identifiable {
     public static func output(_ uid: String, label: String? = nil) -> Node { Node(id: NodeID("out:" + uid), kind: .output(deviceUID: uid), label: label) }
     public static func input(_ uid: String, label: String? = nil) -> Node { Node(id: NodeID("in:" + uid), kind: .input(deviceUID: uid), label: label) }
     public static func tap(_ bundleID: String, label: String? = nil) -> Node { Node(id: NodeID("tap:" + bundleID), kind: .tap(bundleID: bundleID), label: label) }
+    public static func recorder(id: String = UUID().uuidString, label: String? = nil) -> Node { Node(id: NodeID("rec:" + id), kind: .recorder(id: id), label: label) }
 }
 
 public struct Port: Hashable, Codable, CustomStringConvertible {

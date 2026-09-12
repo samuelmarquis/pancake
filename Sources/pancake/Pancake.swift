@@ -7,7 +7,7 @@ import PancakeCore
 struct Pancake: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "pancake — a routing engine for macOS audio.",
-        subcommands: [Devices.self, Status.self, Run.self, SetOutput.self, ShowGraph.self, ProbeAggregate.self],
+        subcommands: [Devices.self, Status.self, Run.self, Record.self, SetOutput.self, ShowGraph.self, ProbeAggregate.self],
         defaultSubcommand: Status.self
     )
 }
@@ -144,6 +144,71 @@ struct Run: ParsableCommand {
         }
         _ = sources
         dispatchMain()
+    }
+}
+
+// MARK: - record
+
+struct Record: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Record a source to a WAV via a recorder node (proves the recorder path). Stop the app first — one engine at a time.")
+    @OptionGroup var verbose: Verbose
+    @OptionGroup var config: ConfigOption
+    @Option(name: .long, help: "What to record: 'hub' (everything playing into Pancake) or an input device name/UID.") var source: String = "hub"
+    @Option(name: .shortAndLong, help: "Seconds to record.") var seconds: Double = 5
+    @Option(name: .long, help: "Output WAV path (default: ~/Music/Pancake/…).") var to: String?
+
+    func run() throws {
+        verbose.apply()
+        var graph = (try config.store.load()) ?? Graph()
+
+        // Wire the chosen source into a fresh recorder node.
+        let srcID: NodeID
+        let srcChannels: Int
+        if source.lowercased() == "hub" {
+            graph.upsert(.hub)
+            srcID = Graph.hubID
+            srcChannels = 2
+        } else {
+            guard let d = AudioDevice.find(nameOrUID: source), d.hasInput else { throw ValidationError("no input device matches '\(source)'") }
+            let n = Node.input(d.uid, label: d.name)
+            graph.upsert(n)
+            srcID = n.id
+            srcChannels = max(1, d.inputChannels)
+        }
+        let rec = Node.recorder()
+        graph.upsert(rec)
+        if srcChannels >= 2 {
+            graph.connect(Port(srcID, 0), Port(rec.id, 0))
+            graph.connect(Port(srcID, 1), Port(rec.id, 1))
+        } else {
+            graph.connect(Port(srcID, 0), Port(rec.id, 0))   // mono → both recorder channels
+            graph.connect(Port(srcID, 0), Port(rec.id, 1))
+        }
+
+        let engine = Engine(graph: graph)
+        let ready = DispatchSemaphore(value: 0)
+        var signalled = false
+        engine.onStateChange = { state in
+            switch state {
+            case .running where !signalled: signalled = true; ready.signal()
+            case .degraded(let why): Log.warn("engine degraded: \(why)")
+            default: break
+            }
+        }
+        engine.start()
+        if ready.wait(timeout: .now() + 6) == .timedOut {
+            engine.stop()
+            throw ValidationError("engine didn't reach running — is Pancake.driver installed and no other engine (the app?) running?")
+        }
+
+        let url = to.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? RecordingLocation.defaultFile()
+        try engine.startRecording(node: rec.id, to: url)
+        Log.info("recording \(source) for \(seconds)s → \(url.path)")
+        Thread.sleep(forTimeInterval: seconds)
+        let elapsed = engine.recordingElapsed(rec.id) ?? 0
+        engine.stopRecording(rec.id)
+        engine.stop()
+        print("wrote \(url.path)  (~\(String(format: "%.2f", elapsed))s captured)")
     }
 }
 
