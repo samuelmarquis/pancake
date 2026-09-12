@@ -135,6 +135,7 @@ enum
     kObjectID_Pitch_Adjust              = 10,
     kObjectID_ClockSource               = 11,
     kObjectID_Device2                   = 12,
+    kObjectID_Device3                   = 13,
 };
 
 enum
@@ -184,6 +185,7 @@ struct ObjectInfo {
 #define                             kBox_UID                            kDriver_Name kDriver_Name_Format "_UID"
 #define                             kDevice_UID                         kDriver_Name kDriver_Name_Format "_UID"
 #define                             kDevice2_UID                        kDriver_Name kDriver_Name_Format "_2_UID"
+#define                             kDevice3_UID                        kDriver_Name kDriver_Name_Format "_3_UID"
 #define                             kDevice_ModelUID                    kDriver_Name kDriver_Name_Format "_ModelUID"
 
 
@@ -195,11 +197,16 @@ struct ObjectInfo {
 #define                             kDevice2_Name                       "Pancake Mic"
 #endif
 
+#ifndef kDevice3_Name
+#define                             kDevice3_Name                       "Pancake Program"
+#endif
+
 
 #else
 #define                             kBox_UID                            kDriver_Name "_UID"
 #define                             kDevice_UID                         kDriver_Name "_UID"
 #define                             kDevice2_UID                        "PancakeMic_UID"
+#define                             kDevice3_UID                        "PancakeProgram_UID"
 #define                             kDevice_ModelUID                    kDriver_Name "_ModelUID"
 
 
@@ -211,6 +218,10 @@ struct ObjectInfo {
 #define                             kDevice2_Name                       "Pancake Mic"
 #endif
 
+#ifndef kDevice3_Name
+#define                             kDevice3_Name                       "Pancake Program"
+#endif
+
 #endif
 
 #ifndef kDevice_IsHidden
@@ -219,6 +230,10 @@ struct ObjectInfo {
 
 #ifndef kDevice2_IsHidden
 #define                             kDevice2_IsHidden                   false
+#endif
+
+#ifndef kDevice3_IsHidden
+#define                             kDevice3_IsHidden                   false
 #endif
 
 
@@ -236,8 +251,16 @@ struct ObjectInfo {
 #define                             kDevice2_HasInput                   true
 #endif
 
+#ifndef kDevice3_HasInput
+#define                             kDevice3_HasInput                   true
+#endif
+
 #ifndef kDevice2_HasOutput
 #define                             kDevice2_HasOutput                  true
+#endif
+
+#ifndef kDevice3_HasOutput
+#define                             kDevice3_HasOutput                  true
 #endif
 
 
@@ -284,6 +307,7 @@ static Float64                      gDevice_SampleRate                  = 48000.
 static Float64                      gDevice_RequestedSampleRate         = 0.0;
 static UInt64                       gDevice_IOIsRunning                 = 0;
 static UInt64                       gDevice2_IOIsRunning                = 0;
+static UInt64                       gDevice3_IOIsRunning                = 0;
 static const UInt32                 kDevice_RingBufferSize              = 16384;
 static Float64                      gDevice_HostTicksPerFrame           = 0.0;
 static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
@@ -333,6 +357,19 @@ static struct ObjectInfo            kDevice2_ObjectList[]                = {
 static const UInt32                 kDevice_ObjectListSize              = sizeof(kDevice_ObjectList) / sizeof(struct ObjectInfo);
 static const UInt32                 kDevice2_ObjectListSize              = sizeof(kDevice2_ObjectList) / sizeof(struct ObjectInfo);
 
+
+static struct ObjectInfo            kDevice3_ObjectList[]                = {
+    // pancake: "Pancake Program" is the silent stream sink the Stage renders into. Like
+    // "Pancake Mic" it exposes no controls; nobody monitors it, so it is inaudible to you.
+#if kDevice3_HasInput
+    { kObjectID_Stream_Input,           kObjectType_Stream,     kAudioObjectPropertyScopeInput  },
+#endif
+#if kDevice3_HasOutput
+    { kObjectID_Stream_Output,          kObjectType_Stream,     kAudioObjectPropertyScopeOutput },
+#endif
+};
+static const UInt32                 kDevice3_ObjectListSize              = sizeof(kDevice3_ObjectList) / sizeof(struct ObjectInfo);
+
 #ifndef kSampleRates
 #define                             kSampleRates       44100, 48000, 88200, 96000
 #endif
@@ -350,12 +387,12 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
 // pancake: one ring buffer per device (index 0 = Pancake, 1 = Pancake Mic) so the
 // two devices carry independent audio. Upstream BlackHole shares a single buffer
 // between its main device and its hidden "Mirror" device.
-static Float32*                     gRingBuffer[2]                      = { NULL, NULL };
-static Float64                      gLastOutputSampleTime[2]            = { 0, 0 };
-static Boolean                      gIsBufferClear[2]                   = { true, true };
+static Float32*                     gRingBuffer[3]                      = { NULL, NULL, NULL };
+static Float64                      gLastOutputSampleTime[3]            = { 0, 0, 0 };
+static Boolean                      gIsBufferClear[3]                   = { true, true, true };
 static inline int pancake_device_index(AudioObjectID inDeviceObjectID)
 {
-    return (inDeviceObjectID == kObjectID_Device2) ? 1 : 0;
+    return (inDeviceObjectID == kObjectID_Device2) ? 1 : (inDeviceObjectID == kObjectID_Device3) ? 2 : 0;
 }
 
 
@@ -469,6 +506,8 @@ static CFStringRef get_device_uid(void)       { RETURN_FORMATTED_STRING(kDevice_
 static CFStringRef get_device_name(void)      { RETURN_FORMATTED_STRING(kDevice_Name) }
 static CFStringRef get_device2_uid(void)      { RETURN_FORMATTED_STRING(kDevice2_UID) }
 static CFStringRef get_device2_name(void)     { RETURN_FORMATTED_STRING(kDevice2_Name) }
+static CFStringRef get_device3_uid(void)      { RETURN_FORMATTED_STRING(kDevice3_UID) }
+static CFStringRef get_device3_name(void)     { RETURN_FORMATTED_STRING(kDevice3_Name) }
 static CFStringRef get_device_model_uid(void) { RETURN_FORMATTED_STRING(kDevice_ModelUID) }
 
 // Volume conversions
@@ -537,6 +576,23 @@ static UInt32 device_object_list_size(AudioObjectPropertyScope scope, AudioObjec
                 return count;
             }
             break;
+
+        case kObjectID_Device3:
+            {
+                if (scope == kAudioObjectPropertyScopeGlobal)
+                {
+                    return kDevice3_ObjectListSize;
+                }
+
+                UInt32 count = 0;
+                for (UInt32 i = 0; i < kDevice3_ObjectListSize; i++)
+                {
+                    count += (kDevice3_ObjectList[i].scope == scope);
+                }
+
+                return count;
+            }
+            break;
             
         default:
             return 0;
@@ -565,6 +621,18 @@ static UInt32 device_stream_list_size(AudioObjectPropertyScope scope, AudioObjec
                 for (UInt32 i = 0; i < kDevice2_ObjectListSize; i++)
                 {
                     count += (kDevice2_ObjectList[i].type == kObjectType_Stream && (kDevice2_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
+                }
+
+                return count;
+            }
+            break;
+
+        case kObjectID_Device3:
+            {
+                UInt32 count = 0;
+                for (UInt32 i = 0; i < kDevice3_ObjectListSize; i++)
+                {
+                    count += (kDevice3_ObjectList[i].type == kObjectType_Stream && (kDevice3_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
                 }
 
                 return count;
@@ -601,6 +669,19 @@ static UInt32 device_control_list_size(AudioObjectPropertyScope scope, AudioObje
             for (UInt32 i = 0; i < kDevice2_ObjectListSize; i++)
             {
                 count += (kDevice2_ObjectList[i].type == kObjectType_Control && (kDevice2_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
+            }
+
+            return count;
+        }
+            break;
+
+        case kObjectID_Device3:
+        {
+            
+            UInt32 count = 0;
+            for (UInt32 i = 0; i < kDevice3_ObjectListSize; i++)
+            {
+                count += (kDevice3_ObjectList[i].type == kObjectType_Control && (kDevice3_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
             }
 
             return count;
@@ -867,7 +948,7 @@ static OSStatus	Pancake_AddDeviceClient(AudioServerPlugInDriverRef inDriver, Aud
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_AddDeviceClient: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_AddDeviceClient: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_AddDeviceClient: bad device ID");
 
 Done:
 	return theAnswer;
@@ -886,7 +967,7 @@ static OSStatus	Pancake_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, 
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_RemoveDeviceClient: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_RemoveDeviceClient: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_RemoveDeviceClient: bad device ID");
 
 Done:
 	return theAnswer;
@@ -917,7 +998,7 @@ static OSStatus	Pancake_PerformDeviceConfigurationChange(AudioServerPlugInDriver
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad driver reference");
-    FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad device ID");
+    FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad device ID");
     switch(inChangeAction)
     {
         case ChangeAction_EnablePitchControl:
@@ -975,7 +1056,7 @@ static OSStatus	Pancake_AbortDeviceConfigurationChange(AudioServerPlugInDriverRe
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_PerformDeviceConfigurationChange: bad device ID");
 
 Done:
 	return theAnswer;
@@ -1009,6 +1090,7 @@ static Boolean	Pancake_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObj
 		
 		case kObjectID_Device:
         case kObjectID_Device2:
+        case kObjectID_Device3:
 			theAnswer = Pancake_HasDeviceProperty(inDriver, inObjectID, inClientProcessID, inAddress);
 			break;
 		
@@ -1059,6 +1141,7 @@ static OSStatus	Pancake_IsPropertySettable(AudioServerPlugInDriverRef inDriver, 
 		
 		case kObjectID_Device:
         case kObjectID_Device2:
+        case kObjectID_Device3:
 			theAnswer = Pancake_IsDevicePropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
 		
@@ -1112,6 +1195,7 @@ static OSStatus	Pancake_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
 		
 		case kObjectID_Device:
         case kObjectID_Device2:
+        case kObjectID_Device3:
 			theAnswer = Pancake_GetDevicePropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
 		
@@ -1166,6 +1250,7 @@ static OSStatus	Pancake_GetPropertyData(AudioServerPlugInDriverRef inDriver, Aud
 		
 		case kObjectID_Device:
         case kObjectID_Device2:
+        case kObjectID_Device3:
 			theAnswer = Pancake_GetDevicePropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
 		
@@ -1218,6 +1303,7 @@ static OSStatus	Pancake_SetPropertyData(AudioServerPlugInDriverRef inDriver, Aud
 		
 		case kObjectID_Device:
         case kObjectID_Device2:
+        case kObjectID_Device3:
 			theAnswer = Pancake_SetDevicePropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
 		
@@ -1391,7 +1477,7 @@ static OSStatus	Pancake_GetPlugInPropertyDataSize(AudioServerPlugInDriverRef inD
 		case kAudioPlugInPropertyDeviceList:
 			if(gBox_Acquired)
 			{
-				*outDataSize = sizeof(AudioClassID)*2;
+				*outDataSize = sizeof(AudioClassID)*3;
 			}
 			else
 			{
@@ -1559,13 +1645,19 @@ static OSStatus	Pancake_GetPlugInPropertyData(AudioServerPlugInDriverRef inDrive
 			
 			//	Clamp that to the number of devices this driver implements (which is just 1 if the
 			//	box has been acquired)
-			if(theNumberItemsToFetch > (gBox_Acquired ? 2 : 0))
+			if(theNumberItemsToFetch > (gBox_Acquired ? 3 : 0))
 			{
-				theNumberItemsToFetch = (gBox_Acquired ? 2 : 0);
+				theNumberItemsToFetch = (gBox_Acquired ? 3 : 0);
 			}
-			
+
 			//	Write the devices' object IDs into the return value
-			if(theNumberItemsToFetch > 1)
+			if(theNumberItemsToFetch > 2)
+			{
+				((AudioObjectID*)outData)[0] = kObjectID_Device;
+                ((AudioObjectID*)outData)[1] = kObjectID_Device2;
+                ((AudioObjectID*)outData)[2] = kObjectID_Device3;
+			}
+			else if(theNumberItemsToFetch > 1)
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Device;
                 ((AudioObjectID*)outData)[1] = kObjectID_Device2;
@@ -1859,7 +1951,7 @@ static OSStatus	Pancake_GetBoxPropertyDataSize(AudioServerPlugInDriverRef inDriv
 		case kAudioBoxPropertyDeviceList:
 			{
 				pthread_mutex_lock(&gPlugIn_StateMutex);
-				*outDataSize = gBox_Acquired ? sizeof(AudioObjectID) * 2 : 0;
+				*outDataSize = gBox_Acquired ? sizeof(AudioObjectID) * 3 : 0;
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
 			}
 			break;
@@ -2042,7 +2134,14 @@ static OSStatus	Pancake_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver, 
                 }
                 else
                 {
-                    if (inDataSize >= sizeof(AudioObjectID) * 2)
+                    if (inDataSize >= sizeof(AudioObjectID) * 3)
+                    {
+                        ((AudioObjectID*)outData)[0] = kObjectID_Device;
+                        ((AudioObjectID*)outData)[1] = kObjectID_Device2;
+                        ((AudioObjectID*)outData)[2] = kObjectID_Device3;
+                        *outDataSize = sizeof(AudioObjectID) * 3;
+                    }
+                    else if (inDataSize >= sizeof(AudioObjectID) * 2)
                     {
                         ((AudioObjectID*)outData)[0] = kObjectID_Device;
                         ((AudioObjectID*)outData)[1] = kObjectID_Device2;
@@ -2188,7 +2287,7 @@ static Boolean	Pancake_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, Au
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "Pancake_HasDeviceProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "Pancake_HasDeviceProperty: no address");
-	FailIf(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2, Done, "Pancake_HasDeviceProperty: not the device object");
+	FailIf(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2 && inObjectID != kObjectID_Device3, Done, "Pancake_HasDeviceProperty: not the device object");
 	
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
@@ -2246,7 +2345,7 @@ static OSStatus	Pancake_IsDevicePropertySettable(AudioServerPlugInDriverRef inDr
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_IsDevicePropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_IsDevicePropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_IsDevicePropertySettable: no place to put the return value");
-	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_IsDevicePropertySettable: not the device object");
+	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2 && inObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_IsDevicePropertySettable: not the device object");
 	
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
@@ -2307,7 +2406,7 @@ static OSStatus	Pancake_GetDevicePropertyDataSize(AudioServerPlugInDriverRef inD
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetDevicePropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_GetDevicePropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_GetDevicePropertyDataSize: no place to put the return value");
-	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetDevicePropertyDataSize: not the device object");
+	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2 && inObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetDevicePropertyDataSize: not the device object");
 	
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
@@ -2441,7 +2540,7 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_GetDevicePropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_GetDevicePropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_GetDevicePropertyData: no place to put the return value");
-	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetDevicePropertyData: not the device object");
+	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2 && inObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetDevicePropertyData: not the device object");
 	
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
@@ -2485,6 +2584,11 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                     *((CFStringRef*)outData) = get_device2_name();
                     *outDataSize = sizeof(CFStringRef);
                     break;
+
+                case kObjectID_Device3:
+                    *((CFStringRef*)outData) = get_device3_name();
+                    *outDataSize = sizeof(CFStringRef);
+                    break;
             }
 			break;
 			
@@ -2522,6 +2626,16 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                         }
                     }
                     break;
+
+                case kObjectID_Device3:
+                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
+                    {
+                        if (kDevice3_ObjectList[i].scope == inAddress->mScope || inAddress->mScope == kAudioObjectPropertyScopeGlobal)
+                        {
+                            ((AudioObjectID*)outData)[k++] = kDevice3_ObjectList[i].id;
+                        }
+                    }
+                    break;
             }
 
 			//	report how much we wrote
@@ -2542,6 +2656,11 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                     
                 case kObjectID_Device2:
                     *((CFStringRef*)outData) = get_device2_uid();
+                    *outDataSize = sizeof(CFStringRef);
+                    break;
+
+                case kObjectID_Device3:
+                    *((CFStringRef*)outData) = get_device3_uid();
                     *outDataSize = sizeof(CFStringRef);
                     break;
             }
@@ -2599,6 +2718,10 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                     case kObjectID_Device2:
                         ((AudioObjectID*)outData)[0] = kObjectID_Device2;
                         break;
+
+                    case kObjectID_Device3:
+                        ((AudioObjectID*)outData)[0] = kObjectID_Device3;
+                        break;
                 }
 				
 			}
@@ -2644,6 +2767,10 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                 case kObjectID_Device2:
                     *((UInt32*)outData) = ((gDevice2_IOIsRunning > 0) > 0) ? 1 : 0;
                     break;
+
+                case kObjectID_Device3:
+                    *((UInt32*)outData) = ((gDevice3_IOIsRunning > 0) > 0) ? 1 : 0;
+                    break;
                 default:
                     *((UInt32*)outData) = 0;
                     break;
@@ -2659,7 +2786,7 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
 			//	will use to play their content on and FaceTime will use as it's microhphone.
 			//	Nearly all devices should allow for this.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "Pancake_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyDeviceCanBeDefaultDevice for the device");
-			*((UInt32*)outData) = kCanBeDefaultDevice;
+			*((UInt32*)outData) = (inObjectID == kObjectID_Device3) ? 0 : kCanBeDefaultDevice;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2669,7 +2796,7 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
 			//	other incidental or UI-related sounds on. Most devices should allow this
 			//	although devices with lots of latency may not want to.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "Pancake_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyDeviceCanBeDefaultSystemDevice for the device");
-			*((UInt32*)outData) = kCanBeDefaultSystemDevice;
+			*((UInt32*)outData) = (inObjectID == kObjectID_Device3) ? 0 : kCanBeDefaultSystemDevice;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2710,6 +2837,17 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                         }
                     }
                     break;
+
+                case kObjectID_Device3:
+                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
+                    {
+                        if ((kDevice3_ObjectList[i].type == kObjectType_Stream) &&
+                            (kDevice3_ObjectList[i].scope == inAddress->mScope || inAddress->mScope == kAudioObjectPropertyScopeGlobal))
+                        {
+                            ((AudioObjectID*)outData)[k++] = kDevice3_ObjectList[i].id;
+                        }
+                    }
+                    break;
             }
 
 			//	report how much we wrote
@@ -2744,6 +2882,16 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                         if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
                         {
                             ((AudioObjectID*)outData)[k++] = kDevice2_ObjectList[i].id;
+                        }
+                    }
+                    break;
+
+                case kObjectID_Device3:
+                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
+                    {
+                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
+                        {
+                            ((AudioObjectID*)outData)[k++] = kDevice3_ObjectList[i].id;
                         }
                     }
                     break;
@@ -2809,6 +2957,10 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                 
                 case kObjectID_Device2:
                     *((UInt32*)outData) = kDevice2_IsHidden;
+                    break;
+
+                case kObjectID_Device3:
+                    *((UInt32*)outData) = kDevice3_IsHidden;
                     break;
             }
 			*outDataSize = sizeof(UInt32);
@@ -2888,7 +3040,7 @@ static OSStatus	Pancake_SetDevicePropertyData(AudioServerPlugInDriverRef inDrive
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_SetDevicePropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_SetDevicePropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_SetDevicePropertyData: no place to return the properties that changed");
-	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_SetDevicePropertyData: not the device object");
+	FailWithAction(inObjectID != kObjectID_Device && inObjectID != kObjectID_Device2 && inObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_SetDevicePropertyData: not the device object");
 	
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
@@ -4342,9 +4494,10 @@ static OSStatus	Pancake_StartIO(AudioServerPlugInDriverRef inDriver, AudioObject
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StartIO: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StartIO: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StartIO: bad device ID");
     FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: overflow error.");
     FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: overflow error.");
+    FailWithAction(inDeviceObjectID == kObjectID_Device3 && gDevice3_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: overflow error.");
 
 	//	we need to hold the state lock
 	pthread_mutex_lock(&gPlugIn_StateMutex);
@@ -4352,9 +4505,10 @@ static OSStatus	Pancake_StartIO(AudioServerPlugInDriverRef inDriver, AudioObject
     
     if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning += 1; }
     if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning += 1; }
+    if (inDeviceObjectID == kObjectID_Device3) { gDevice3_IOIsRunning += 1; }
     
     // pancake: re-anchor the shared clock when the very first client (on either device) starts.
-    if (gDevice_IOIsRunning + gDevice2_IOIsRunning == 1)
+    if (gDevice_IOIsRunning + gDevice2_IOIsRunning + gDevice3_IOIsRunning == 1)
     {
         gDevice_NumberTimeStamps = 0;
         gDevice_AnchorSampleTime = 0;
@@ -4393,9 +4547,10 @@ static OSStatus	Pancake_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectI
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StopIO: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StopIO: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_StopIO: bad device ID");
     FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: underflow error.");
     FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: underflow error.");
+    FailWithAction(inDeviceObjectID == kObjectID_Device3 && gDevice3_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "Pancake_StartIO: underflow error.");
 
 	//	we need to hold the state lock
 	pthread_mutex_lock(&gPlugIn_StateMutex);
@@ -4403,11 +4558,12 @@ static OSStatus	Pancake_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectI
     
     if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
     if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
+    if (inDeviceObjectID == kObjectID_Device3) { gDevice3_IOIsRunning -= 1; }
     
     // pancake: free a device's ring buffer once its last client has stopped.
     {
         int idx = pancake_device_index(inDeviceObjectID);
-        UInt64 stillRunning = (idx == 0) ? gDevice_IOIsRunning : gDevice2_IOIsRunning;
+        UInt64 stillRunning = (idx == 0) ? gDevice_IOIsRunning : (idx == 1) ? gDevice2_IOIsRunning : gDevice3_IOIsRunning;
         if (stillRunning == 0 && gRingBuffer[idx] != NULL)
         {
             free(gRingBuffer[idx]);
@@ -4445,7 +4601,7 @@ static OSStatus	Pancake_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, Au
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetZeroTimeStamp: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetZeroTimeStamp: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_GetZeroTimeStamp: bad device ID");
 
 	//	we need to hold the locks
 	pthread_mutex_lock(&gDevice_IOMutex);
@@ -4499,7 +4655,7 @@ static OSStatus	Pancake_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, A
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_WillDoIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_WillDoIOOperation: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_WillDoIOOperation: bad device ID");
 
 	//	figure out if we support the operation
 	bool willDo = false;
@@ -4544,7 +4700,7 @@ static OSStatus	Pancake_BeginIOOperation(AudioServerPlugInDriverRef inDriver, Au
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_BeginIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_BeginIOOperation: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_BeginIOOperation: bad device ID");
 
 Done:
 	return theAnswer;
@@ -4561,7 +4717,7 @@ static OSStatus	Pancake_DoIOOperation(AudioServerPlugInDriverRef inDriver, Audio
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_DoIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_DoIOOperation: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_DoIOOperation: bad stream ID");
 
     // Calculate the ring buffer offsets and splits.
@@ -4652,7 +4808,7 @@ static OSStatus	Pancake_EndIOOperation(AudioServerPlugInDriverRef inDriver, Audi
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_EndIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_EndIOOperation: bad device ID");
+	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2 && inDeviceObjectID != kObjectID_Device3, theAnswer = kAudioHardwareBadObjectError, Done, "Pancake_EndIOOperation: bad device ID");
 
 Done:
 	return theAnswer;

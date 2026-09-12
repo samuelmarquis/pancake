@@ -2,6 +2,11 @@
 
 Read `README.md` for what it is and `DESIGN.md` for why. This file is the operational stuff.
 
+**Working style (owner's standing preference):** commit at every natural checkpoint — you don't
+need to ask. The remote is `git@github.com:samuelmarquis/pancake.git` (`origin`); push freely.
+And the overarching directive: *always do the correct/hard thing, never the fast/easy/fix-it-later
+thing.*
+
 ## Environment facts
 
 - macOS 26.3, Apple Silicon, **Command Line Tools only — no Xcode, no signing identity.**
@@ -37,9 +42,14 @@ Foundation-needing helpers in `PancakeCore` instead (see `Graph.jsonString()`).
 
 ## Architecture in one breath
 
-`driver/Pancake.c` (GPL fork of BlackHole) gives the system two virtual devices, **Pancake**
-(`Pancake_UID`, the default output, has the volume control) and **Pancake Mic**
-(`PancakeMic_UID`, what Discord records, no controls). `Engine` builds one private aggregate
+`driver/Pancake.c` (GPL fork of BlackHole) gives the system three virtual devices: **Pancake**
+(`Pancake_UID`, the default output, has the volume control), **Pancake Mic**
+(`PancakeMic_UID`, what Discord records, no controls), and **Pancake Program**
+(`PancakeProgram_UID`, a controls-free silent sink the Stage renders the shared program into —
+reports `CanBeDefault* = false` so the system never picks it). All three are
+`kObjectID_Device`/`Device2`/`Device3`, each keyed to its own ring buffer via
+`pancake_device_index` (`gRingBuffer[0|1|2]`); adding a fourth means cloning the `Device3`
+footprint (see `tools/`-style transform history / `git log`). `Engine` builds one private aggregate
 device out of the hub + every device the graph references (real hardware as clock master,
 drift compensation on the rest), installs one IOProc (`pk_ioproc`, C, no allocation/locks),
 and the IOProc applies a `pk_matrix` of routes — `out[b][c] += in[b][c] * gain` — swapped in

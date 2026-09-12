@@ -6,10 +6,11 @@ import PancakeCore
 /// window-shared app's audio is captured even when it's inaudible to you), with none of the call's
 /// own audio — no echo. It's one private aggregate of [sink + tap] and a copy IOProc.
 final class StageAudio {
-    /// Where the tapped audio is rendered. Inaudible to you; the Stage window-share is what carries
-    /// it. (Pancake Mic for now — set Discord's *voice* input to the built-in mic so this bus isn't
-    /// also sent as your voice. A dedicated "Pancake Program" sink is the tidy follow-up.)
-    static let sinkUID = "PancakeMic_UID"
+    /// Where the tapped audio is rendered. Inaudible to you (nobody monitors it); the Stage
+    /// window-share is what carries it. This is the dedicated **Pancake Program** bus, separate
+    /// from **Pancake Mic** (your voice) — so the shared program never bleeds into the Discord
+    /// voice channel. Discord voice input can stay on Pancake Mic (or the built-in mic).
+    static let sinkUID = "PancakeProgram_UID"
     static let aggregateUID = "com.pancake.stage.aggregate"
 
     private var tap: ProcessTap?
