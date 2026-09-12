@@ -246,12 +246,6 @@ final class AppModel: ObservableObject {
         Log.info("menu: stage app → \(bundleID ?? "none")")
     }
 
-    func toggleStageHidden() {
-        stageConfig.hidden.toggle()
-        saveStage()
-        Log.info("menu: stage mirror \(stageConfig.hidden ? "hidden" : "shown")")
-    }
-
     func startStage() {
         refreshStage()
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.stageBundleID) else {

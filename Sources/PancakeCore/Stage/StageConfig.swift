@@ -7,17 +7,17 @@ import Foundation
 /// the menu and the Stage's own controls are just thin views over the same source of truth, and a
 /// text editor or the CLI can drive it too.
 ///
-/// The Stage always mirrors the desktop (that half needs no config). This is only the audio choice
-/// and the window visibility:
+/// The Stage always mirrors the desktop and always keeps its (chrome-free) mirror window parked
+/// off-desktop but shareable, so the only thing to configure is the audio source:
 ///   • `bundleID` — the app whose audio to render into the Pancake Program bus (nil = silence).
-///   • `hidden`   — park the mirror window off-desktop (still shareable) or show it.
+///
+/// (Older files may carry extra keys like `hidden`; JSONDecoder ignores unknown keys, so they load
+/// fine.)
 public struct StageConfig: Codable, Equatable {
     public var bundleID: String?
-    public var hidden: Bool
 
-    public init(bundleID: String? = nil, hidden: Bool = false) {
+    public init(bundleID: String? = nil) {
         self.bundleID = bundleID
-        self.hidden = hidden
     }
 }
 

@@ -255,10 +255,6 @@ private struct StageSection: View {
                 .menuStyle(.borderlessButton)
                 .padding(.horizontal, 6)
 
-                MenuRow(action: { model.toggleStageHidden() }) {
-                    ActionLabel(model.stageConfig.hidden ? "Show mirror window" : "Hide mirror window",
-                                model.stageConfig.hidden ? "eye" : "eye.slash")
-                }
                 MenuRow(action: { model.stopStage() }) { ActionLabel("Stop screen share", "stop.circle") }
             } else {
                 MenuRow(action: { model.startStage() }) { ActionLabel("Start screen share", "play.rectangle") }
