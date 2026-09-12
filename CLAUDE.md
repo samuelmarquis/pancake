@@ -36,6 +36,7 @@ make stage && make run-stage  # build/PancakeStage.app (faceless screen-share he
 tail -f ~/Library/Logs/pancake.log
 .build/debug/pancake status | devices [--all] | graph | set-output <name>
 .build/debug/pancake run [--output <name>] [--hub <name>] [--no-pin] [--no-follow] [--stats N] [--verbose]
+.build/debug/pancake record [--source hub|<device>] [--seconds N] [--to <path>]   # proves the recorder path
 .build/debug/pancake probe-aggregate <dev>... [--main <dev>] [--run N]
 ```
 
@@ -58,6 +59,15 @@ drift compensation on the rest), installs one IOProc (`pk_ioproc`, C, no allocat
 and the IOProc applies a `pk_matrix` of routes — `out[b][c] += in[b][c] * gain` — swapped in
 atomically. `Graph` is the desired state (JSON at `~/.config/pancake/graph.json`); the engine
 derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, engine watches it.
+
+**Recorders** are sink nodes that aren't devices (`NodeKind.recorder`). A route whose `out_buffer`
+carries `PK_REC_FLAG` targets a `pk_context` recorder slot instead of an aggregate output stream; the
+IOProc mixes it into a preallocated stereo scratch and, while armed, `memcpy`s it into a lock-free
+SPSC ring (all allocation at context creation — invariant #3 holds). `RecordingSession` drains the
+ring to a 24-bit WAV via `ExtAudioFile` on a 0.1s timer on the *engine* queue (never the RT thread);
+the ring absorbs disk jitter. Up to `PK_MAX_RECORDERS` (4) stereo recorders. The engine assigns each
+recorder node a slot at every matrix compile (`syncRecorderSlots`); recordings survive a rebuild
+because the ring lives in the context, not the matrix.
 
 ## Invariants — don't break these
 
@@ -136,6 +146,10 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
   just makes everything quiet (found at 0.5). `swift tools/setvol.swift AA-BB-CC-DD-EE-FF:output 1.0`
   is the manual fix; the engine should hold the routed device at unity — see next steps.
+- **Recorder, verified live (2026-09-12).** `pancake record --seconds 6` of the hub while a sound
+  played wrote a valid 2ch/48k/24-bit WAV, 6.005 s, peak −28.9 dBFS. The RT ring is also covered by a
+  sample-exact unit test (`RecorderRingTests`) that pumps known audio through `pk_ioproc` and reads it
+  back. In the UI: add a Recorder node, wire a source in, hit record.
 
 ## Not yet verified / next steps, in order
 

@@ -58,6 +58,11 @@ input locks, "Reconnect" for stolen Bluetooth, screen-share start/stop, and
 - **Screen share is part of the graph**: wire an app's tap → **Pancake Program**
   and the helper streams that app. (Verified live: a Discord window-share of one
   app's audio, friends heard it clearly, no echo.)
+- **Record anything to disk**: add a **Recorder** node and wire any source(s)
+  into it — it has a record/stop button, a live timer, and a folder button to
+  pick where the take lands (defaults to a timestamped `.wav` in `~/Music/Pancake`).
+  Capture is realtime-safe: the mix goes into a lock-free ring the callback only
+  `memcpy`s into, and a background thread writes the file.
 
 Node positions live in `~/.config/pancake/graph-layout.json`; the routing itself
 is `~/.config/pancake/graph.json`, which is the source of truth — the menu, the
@@ -95,6 +100,7 @@ There's also a CLI for scripting and debugging:
 make build                  # → .build/debug/pancake
 .build/debug/pancake status | devices [--all] | graph | set-output <name>
 .build/debug/pancake run --output "MacBook Pro Speakers" --stats 5   # engine without the app
+.build/debug/pancake record --source hub --seconds 10                # record to ~/Music/Pancake
 make test                   # unit tests (passes the flags CLT needs for swift-testing)
 ```
 
@@ -121,7 +127,7 @@ tools/             standalone CoreAudio probes
 
 **In:** three virtual devices, a graph-driven routing engine, a menu-bar output
 switcher, per-app capture via process taps, single-app screen-share audio,
-hot-plug/Bluetooth survival, and the visual graph editor.
+recording to disk, hot-plug/Bluetooth survival, and the visual graph editor.
 
 **Out:** plugin (AU/VST/CLAP) inserts — the C IOProc is pure `out += in*gain` with
 no allocation or locks, and hosting a plugin means calling its render inside that
