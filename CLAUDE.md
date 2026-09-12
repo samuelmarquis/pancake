@@ -154,4 +154,13 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
    `bundleIDs`, so taps can be declared by bundle id rather than pid.
 5. Sleep/wake soak. Sample-rate change on the master (e.g. DDJ-FLX4 at 44.1k) → rebuild path is
    untested.
-6. Graph window. Timebox it.
+6. ✅ **Graph window** — the menu's **Show graph…** opens a pipewire-style patchbay
+   (`Sources/PancakeApp/GraphEditor*.swift`): sources (Pancake, inputs, app taps) on the left with
+   output ports, sinks (outputs, Pancake Mic) on the right with input ports, bezier wires between.
+   Drag port→port to route channel-by-channel; select a wire to set gain (dB) or disconnect; add
+   nodes from a palette of live devices/tappable apps; drag nodes and pan the canvas. Edits apply to
+   the running engine at once and persist to `graph.json`; **node positions live in a separate
+   `~/.config/pancake/graph-layout.json`** so the graph IPC stays clean. Live wires draw solid,
+   desired-but-inactive (device absent / app not running) dashed + dim. Code-complete and compiles
+   clean; **the on-screen render still needs a live click to confirm** (I can't drive the menu from
+   a shell). Remaining polish if wanted: zoom, multi-select, marquee, snapping.
