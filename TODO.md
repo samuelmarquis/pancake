@@ -21,6 +21,9 @@ the aggregate's device buffers). The change, bounded and coherent:
 - **MatrixCompiler / Engine**: emit two-stage routes; carry per-bus params.
 - **Editor**: a mid-canvas node whose input count grows as you wire it (always one spare input).
 
+This bus node *is* "Layer 1" of the plugin work below (mid-graph both-sides nodes) — see the blast-radius
+notes there. Building the bus first means the plugin inherits the whole bipartite-break for free.
+
 ## Compressor inside the bus — feasible, and unlike the plugin question
 
 The plugin problem is "run someone else's render (ObjC/alloc/locks) inside the realtime callback."
@@ -30,12 +33,62 @@ No allocation, no locks, no Swift/ObjC — exactly the kind of DSP that's fine i
 buses exist, the compressor is a small, safe addition (threshold / ratio / attack / release / makeup,
 maybe soft knee). Expose the params on the bus node in the editor.
 
-## Plugin (AU / VST3 / CLAP) inserts — declined for now
+## Plugin (AU / VST3 / CLAP) inserts — declined for now; blast radius mapped
 
-Would violate invariant #3 (the C IOProc must not call ObjC/Swift, allocate, or lock). Hosting a
-plugin means calling its render inside that callback. The RT-safe path is a *separate* processing
-graph (an `AVAudioEngine` side-chain, or an out-of-line render chain feeding a tap), not a contained
-change. AU would be the easiest of the three (first-party hosting) when we do tackle it.
+Still declined, but here's the anatomy so a future leg starts from analysis, not a cold read. Verdict:
+**deep, not wide** — two new subsystems plus a wide-but-shallow sprinkle — and the real cost isn't
+code, it's runtime robustness. AU first (first-party hosting); VST3/CLAP are their own SDKs on top.
+
+### The one fact that shapes everything
+
+`pk_ioproc` is pure C — no ObjC, no alloc, no locks (invariant #3). `AudioUnitRender` is ObjC, can
+allocate, can lock. **So an AU physically cannot run inside the IOProc.** That forks the design:
+
+- A **self-authored** effect (the compressor above) is C DSP → runs *in-cycle*, zero latency. Cheap.
+- An **AU** must run *out-of-line*: the IOProc hands audio to another thread through a ring, that
+  thread calls `AudioUnitRender`, and the result returns through a second ring a cycle+ later. It's
+  the recorder ring (already built, `CPancakeRT`) but **bidirectional and on the hot path** — which
+  drags in latency, a render thread, and "did the plugin keep up" glitches.
+
+### It splits into two layers, and only Layer 2 is the nuke
+
+**Layer 1 — mid-graph nodes (breaks bipartite).** An insert is both sink (in) and source (out), so it
+needs a port on *both* sides. Wide-but-shallow, measured against the tree as of this writing:
+- ~16 `isSource`/`isSink` sites (Graph, GraphEditorModel, GraphEditorView) that assume source XOR sink.
+- ~15 `NodeKind` switches / ~40 case-arms that each want a plugin branch (mechanical, like adding
+  `.recorder` was).
+- ~10 editor spots hard-wired to *one port per side*: `GraphGeom.portCenter(isSource:)`, `PortDot`
+  placing by `node.isSource`, `beginConnection(isSource:)`, `nearestNode(wantSource:)`, the
+  sources-left/sinks-right `autoArrange`. Two ports on a node ⇒ connection + hit-testing + layout each
+  need a real (not huge) rework.
+- **This whole layer is shared with the bus node above.** Build the bus first and the plugin inherits it.
+
+**Layer 2 — out-of-line AU hosting (the actual project).** Depth concentrates in two new places:
+- **CPancakeRT**: per-insert in-ring + out-ring + route flags — the recorder ring generalized. Bounded.
+- **A new AU-host module** (biggest single chunk, self-contained): `AudioComponent` discovery,
+  `AUAudioUnit` instantiation, `allocateRenderResources`, a render thread pulling in-ring →
+  `AudioUnitRender` → out-ring, interleaved↔deinterleaved conversion, and opening the AU's own view.
+- Medium hooks: **MatrixCompiler** (a plugin contributes both sink *and* source slots) and **Engine**
+  (instantiate/free AUs + spin/stop the render thread at rebuild — mirrors `syncRecorderSlots` + a thread).
+
+### Where the complexity actually nukes (ongoing, not lines of code)
+
+1. **Latency & PDC** — out-of-line adds delay + jitter; AUs report their own latency to compensate.
+   Fine for a record/stream bus, bad for live monitoring.
+2. **Format/variety** — mono-only, stereo-only, side-chains, odd layouts, sample-rate re-allocation.
+3. **Third-party AUs crash** — in-process, a bad plugin takes down the IOProc → the user's audio. The
+   robust answer is **out-of-process** hosting (AUv3 `.loadOutOfProcess`), which adds IPC. This is the
+   single biggest reason it's a separate leg, not a feature.
+4. **State/presets** — persist the AU's `fullState` into the graph or a sidecar.
+
+### Rough scale + sequencing
+
+~150 lines of C, a ~300–500-line AU host, ~30 small edits, moderate editor work — a few days to build,
+then a long robustness tail. **Cheapest path to "insert an effect":** bus node → self-authored
+compressor/EQ (both in-cycle, no latency, no crashes) covers ~80% of the want for a fraction of the
+risk; the AU host is the remaining 20% that carries 80% of the pain. Licensing footnote: AU/AUv3 is
+Apple first-party (fine); VST3 is GPLv3-or-proprietary (GPLv3 is compatible with this repo); CLAP is
+MIT (fine).
 
 ## Self-tap safety — add a regression test
 
