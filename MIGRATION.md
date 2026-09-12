@@ -8,7 +8,20 @@ that first.
 
 ---
 
-## 1. The thing that fights: `audio-defaults`
+## 1. The thing that fought: `audio-defaults` — REMOVED 2026-09-11
+
+**Done.** The whole agent (output pin + input guard), its `switchaudio-osx` dependency, and the
+`~/.config/audio-pin-off` escape hatch have been deleted from `home.nix` and `home-manager switch`d
+out. pancake now owns both jobs: output via its default-output pin/follow, and — the part this doc
+originally said to keep — **input via the per-section input lock**. With `policy.lockInput` set, the
+engine pins the system default input to the mic feeding Pancake Mic and re-asserts it whenever
+something (the AirPods on connect) grabs it, which is the HFP-avoidance the input half used to do.
+Verified: forcing the default input to the AirPods, pancake pulls it back to the built-in mic. The
+stale `audio-defaults.last` / `audio-defaults.log` / `audio-pin-off` files were removed too.
+
+The original plan, for the record:
+
+
 
 `~/.config/home-manager/home.nix` defines a launchd agent that **hard-pins the
 system output to `"Loopback Audio"` every few seconds**. During M1–M3, when both

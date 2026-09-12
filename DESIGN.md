@@ -47,16 +47,35 @@ streams apps write into, input streams that read the same frames back through a
 ring buffer. `DoIOOperation` handles `kAudioServerPlugInIOOperationWriteMix` and
 `kAudioServerPlugInIOOperationReadInput`.
 
-**Don't write this from scratch.** BlackHole (MIT, Existential Audio) is exactly
-this in ~2–3k lines of C. Fork it, rename bundle ID / device name / UID, cut the
-channel-count variants to stereo.
+**Don't write this from scratch.** BlackHole (Existential Audio) is exactly this
+in ~4.6k lines of C. **It is GPL-3.0, not MIT** — fine for a personal tool, and the
+driver sits behind a process boundary (it runs inside `coreaudiod`; the engine only
+talks HAL to it), so `Sources/` stays unencumbered. Forked as `driver/Pancake.c`.
 
-### It must expose a volume control
+### Two devices, not one
+
+The Discord case ("they should hear Ableton, not themselves") needs a virtual
+*microphone* whose content the graph decides — not a mirror of the system output.
+So the driver exposes two independent loopback devices:
+
+| Device | UID | Graph role |
+|---|---|---|
+| **Pancake** | `Pancake_UID` | `hub` — apps play here, the engine reads it. System default output. |
+| **Pancake Mic** | `PancakeMic_UID` | `mic` — the engine writes here, apps record from it. |
+
+BlackHole already has a second device ("Mirror"), but it shares the first one's
+ring buffer. The fork gives each device its own; that's the one substantive change.
+
+### It must expose a volume control — on Pancake only
 
 `kAudioDevicePropertyVolumeScalar`, output scope, settable, applied once in
 `DoIOOperation`. Deliberate and load-bearing: **Pancake is the system output
 device, so this is what the volume keys drive, and it's what stands between a bad
 graph and your eardrums.** Never hardwire it to unity.
+
+**Pancake Mic has no controls at all**, and neither device has input-scope
+controls. Upstream shares one volume value across every control object, so a
+volume-key press would otherwise attenuate the Discord feed too.
 
 ---
 
@@ -70,18 +89,26 @@ engine onto a hardcoded single-route engine later is genuinely painful, and this
 costs almost nothing up front.
 
 ```
-Node  = ProcessTap(pid, bundleID)     // per-app capture, macOS 14.4+
-      | DeviceInput(uid)              // physical input
-      | VirtualOut                    // what apps wrote to Pancake
-      | DeviceOutput(uid)             // physical output
-      | VirtualIn                     // what apps can record from Pancake
+Node  = hub                           // "Pancake": what apps played (source)
+      | mic                           // "Pancake Mic": what apps can record (sink)
+      | input(deviceUID)              // physical input (source)
+      | output(deviceUID)             // physical output (sink)
+      | tap(bundleID)                 // per-app capture, macOS 14.2+ (source; M5)
 
-Link  = { from: (Node, channel), to: (Node, channel), gain: Float }
+Link  = { from: (Node, channel), to: (Node, channel), gain: Float = 1 }
 ```
 
-"Select output device" is then: drop every `Link` out of `VirtualOut`, add
-`VirtualOut[L,R] → DeviceOutput(chosen)[L,R]` at unity. One code path, whether it
-was driven by a menu click or by dragging a cable.
+"Select output device" is then `Graph.setOutput(uid:)`: drop the hub's links to
+output nodes, add `hub[L,R] → output(chosen)[L,R]` at unity, leave everything else
+(mic mixes, taps) alone. One code path, whether it was driven by a menu click, the
+CLI, or dragging a cable. The graph is the *desired* state and may reference
+unplugged devices; the engine derives an *effective* graph from it on every
+rebuild (absent devices dropped, a fallback output added if the hub would
+otherwise be silent).
+
+**The graph file is the IPC.** `~/.config/pancake/graph.json`, watched by the
+running engine. The menu bar, the CLI and a text editor all just write it. Keeps
+the daemon dumb and the config home-manager-able.
 
 ### The hard problem: clock drift
 
@@ -105,9 +132,11 @@ AudioHardwareCreateAggregateDevice({
 })
 ```
 
-Set `kAudioSubDevicePropertyDriftCompensation = 1` on every sub-device **except**
-the master. (The main/master key was renamed across SDKs — older headers spell it
-`kAudioAggregateDeviceMasterSubDeviceKey`.)
+Ask for drift compensation on every sub-device **except** the master via
+`kAudioSubDeviceDriftCompensationKey` in the composition. (Reading it back on the
+sub-devices doesn't work on macOS 26 — `ActiveSubDeviceList` returns plain device
+IDs, which answer `'who?'` to `kAudioSubDeviceProperty*`.) The main/master key was
+renamed across SDKs — older headers spell it `kAudioAggregateDeviceMasterSubDeviceKey`.
 
 Then install **one** `AudioDeviceCreateIOProcID` on the aggregate. Every node
 appears in a single callback in one clock domain, and the inner loop is just the
@@ -136,10 +165,39 @@ Where the real bugs will be, not in the DSP. Listen on
 devices, rebuild the aggregate, restart the IOProc. Rebuild rather than mutating a
 live aggregate. Serialize all teardown/rebuild onto one queue from the very
 beginning — device callbacks arrive on arbitrary threads while the IOProc runs,
-and retrofitting that serialization later is miserable.
+and retrofitting that serialization later is miserable. (`Engine` does exactly
+this: one `DispatchQueue`, every state mutation on it, debounced rebuilds.)
+
+**Learned the hard way:** a private aggregate is visible to the process that
+created it, and creating or destroying one fires `kAudioHardwarePropertyDevices`
+*to you*. Rebuild on every notification and you rebuild forever. The engine
+snapshots the set of device UIDs (minus its own aggregate) at each rebuild and
+ignores notifications that don't change it.
+
+### Follow the default output
+
+macOS moves the default output device around on its own — to AirPods when they
+connect, back to the speakers when they leave — and that's the very behaviour
+that made `audio-defaults` necessary. pancake turns it into a feature: the engine
+listens for default-output changes, and when the new default is a *physical*
+output it routes `hub → that device` and pins the default back to the hub. The
+result is that Control Center's output picker *is* pancake's picker, and AirPods
+connecting routes audio to them without anyone touching anything. Virtual
+devices (e.g. `Loopback Audio`, set by the old agent) are never followed.
 
 Budget real time here. AirPods vanishing mid-stream, wake from sleep, and sample
-rate renegotiation are what will actually bite.
+rate renegotiation are what will actually bite. Two things that were open are now
+settled on this machine:
+
+- Headset-mode drop: **doesn't happen.** macOS 26 lists the AirPods as two
+  devices, `…:input` (24 kHz mono) and `…:output` (48 kHz stereo); only `:output`
+  goes in the aggregate and it stays at 48 kHz.
+- Theft: **a running IOProc does not stop the phone taking them.** What pancake
+  can do is mute instead of falling back to speakers, and ask Bluetooth for them
+  back when audio resumes here.
+- And a third, found the expensive way: the app reading zeros from the hub was
+  never the aggregate or the driver — it was a missing Microphone grant. TCC
+  hands a denied client silence, not an error. `CLAUDE.md` § App notes.
 
 ---
 
@@ -180,10 +238,28 @@ So the rule:
 |---|---|---|
 | Device volume | driver | volume keys, live |
 | Link gain | graph | you, in the UI or the config — defaults to unity |
-| Physical device hardware volume | — | **nobody. pancake never writes it.** |
+| Physical device hardware volume | engine | **held at unity while pancake routes to it** — see below |
 
 Links default to unity and stay there unless explicitly changed. Nothing in the
 program ever adjusts a gain on its own.
+
+**The one exception, and why (2026-09-11).** The original rule was "pancake never
+writes a physical device's volume". Then the AirPods came back from the phone with
+their own hardware volume at 0.5. With Pancake as the default output the volume
+keys drive Pancake's control, so that gain is invisible — exactly the silent,
+stateful, per-device gain this project exists to kill, just with iOS as the culprit
+instead of Loopback. So: while a physical device is the hub's routed output, the
+engine holds its hardware volume at unity, re-asserts it if anything else changes
+it, restores the previous value when it stops routing there, and logs every write.
+The audible volume is then exactly Pancake's slider, always. On quit the device is
+left at Pancake's level rather than the saved one, so handing the system output
+back never changes what you hear.
+
+Known trade-off: an on-device volume gesture (an AirPods stem swipe) writes that
+same hardware volume, so while pancake holds it the gesture is undone within a
+tick and logged as `something set … re-asserted unity`. If that turns out to
+matter, the fix is to mirror the gesture into Pancake's own volume instead of
+fighting it — the same log line is where you'd find out.
 
 ---
 
@@ -192,11 +268,11 @@ program ever adjusts a gain on its own.
 | # | Deliverable | Rough effort |
 |---|---|---|
 | M0 | CoreAudio probes — **done**, see `tools/` | — |
-| M1 | Fork BlackHole → stereo "Pancake" device loads, appears in Sound settings | 1–3 days, mostly signing |
-| M2 | Graph model + engine: aggregate, drift comp, one IOProc, hardcoded 2-node graph | 3–5 days |
-| M3 | Hot-plug survives connect / disconnect / sleep without a restart | 3–5 days ← the real work |
-| M4 | Menu bar output switcher + config + launchd agent | 2–3 days |
-| M5 | Process taps as graph sources | 3–5 days |
+| M1 | Fork BlackHole → "Pancake" + "Pancake Mic" — **built, not yet installed** (`sudo make install-driver`) | signing turned out to be ad-hoc `codesign -s -` |
+| M2 | Graph model + engine: aggregate, drift comp, one IOProc — **done**, verified against Loopback Audio as hub | — |
+| M3 | Hot-plug survives connect / disconnect / sleep without a restart — engine rebuilds on device changes; **unproven against real AirPods** | ← the real work |
+| M4 | Menu bar output switcher + launchd agent — config file and CLI exist; no UI | 2–3 days |
+| M5 | Process taps as graph sources — `tap` node exists in the model; engine skips it | 3–5 days |
 | M6 | Graph window | open-ended — scope carefully |
 
 M1–M4 is a tool worth using daily, and supersedes the `audio-defaults` agent —
@@ -211,8 +287,9 @@ to do it in.
 
 ## Risks
 
-- **Driver signing.** `coreaudiod` is picky about HAL plug-ins. Budget a day of
-  pure frustration and don't be surprised.
+- **Driver signing.** `coreaudiod` is picky about HAL plug-ins. The bundle is
+  ad-hoc signed (no Developer ID on this machine); whether `coreaudiod` on macOS
+  26.3 loads it is the first thing to find out at install time.
 - **Hot-plug races.** See above. Serialize from day one.
 - **Sample-rate mismatch.** Pin the aggregate to the master's nominal rate,
   rebuild on change, don't be clever.
@@ -220,7 +297,7 @@ to do it in.
 
 ## Prior art
 
-- **BlackHole** (MIT) — the virtual device, essentially verbatim for M1
+- **BlackHole** (GPL-3.0) — the virtual device; `driver/` is a fork
 - **Background Music** (GPL) — per-app volume + virtual device, good architecture read
 - **AudioCap** (Guilherme Rambo) — process taps worked end-to-end, for M5
 

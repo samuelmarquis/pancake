@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>pancake</string>
+	<key>CFBundleExecutable</key>
+	<string>Pancake</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.pancake.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>pancake</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>pancake reads the audio you play into its Pancake device so it can send it to your headphones. Without this, everything it routes is silence.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>pancake reconnects Bluetooth headphones you have chosen as your output.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>pancake captures per-app audio so it can be routed.</string>
+</dict>
+</plist>
