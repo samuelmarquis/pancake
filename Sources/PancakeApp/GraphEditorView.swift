@@ -103,6 +103,14 @@ private struct GraphCanvas: View {
                 pendingWire
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            // One tracker for the whole canvas decides hover geometrically — robust against layering.
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let p): editor.hoverAt(p)
+                case .ended: editor.hoverEnded()
+                }
+            }
         }
     }
 
@@ -114,7 +122,6 @@ private struct GraphCanvas: View {
                 NodeCard(node: node, hovered: editor.hoveredNode == node.id)
                     .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight)
                     .position(center)
-                    .onHover { $0 ? editor.hoverNode(node.id) : editor.unhoverNode(node.id) }
                     .gesture(
                         DragGesture(minimumDistance: 3)
                             .onChanged { editor.dragNode(node.id, translation: $0.translation) }
@@ -138,7 +145,6 @@ private struct GraphCanvas: View {
             if editor.hoveredNode == node.id, !node.isPermanent, let origin = editor.positions[node.id] {
                 DeleteBubble(onRemove: { editor.removeNode(node.id) })
                     .position(CGPoint(x: origin.x, y: origin.y).offset(editor.pan))
-                    .onHover { $0 ? editor.hoverNode(node.id) : editor.unhoverNode(node.id) }
             }
         }
     }
@@ -232,8 +238,11 @@ private struct WireShape: Shape {
     func path(in rect: CGRect) -> Path { bezier(from: from, to: to) }
 }
 
-// MARK: - Edge interaction (hover hit area + gain knob)
+// MARK: - Edge interaction (gain knob / stage badge at the midpoint)
 
+/// Renders the knob (audio) or record badge (screen share) at a hovered wire's midpoint, and carries
+/// their drag/tap gestures. Hover itself is decided centrally (GraphEditorModel.hoverAt) — this view
+/// has no hit region of its own, so it can never steal hover from nodes or other wires.
 private struct EdgeInteractor: View {
     @ObservedObject var editor: GraphEditorModel
     let edge: BusEdge
@@ -244,50 +253,28 @@ private struct EdgeInteractor: View {
     private var hot: Bool { editor.hoveredEdge == edge.id || editor.knobEdge == edge.id }
 
     var body: some View {
-        ZStack {
-            // Hit region: fat stroke of the curve ∪ a disc at the midpoint, so moving onto the knob
-            // keeps the wire "hovered" and the knob doesn't flicker away.
-            // The hit area must be the wire's own shape (fat stroke ∪ midpoint disc), NOT a canvas-
-            // filling Color.clear — a full-canvas clear on the topmost edge swallows hover everywhere,
-            // starving nodes and other wires of it. A ~transparent fill still tracks hover fine.
-            EdgeHitShape(from: from, to: to, width: 20, knob: mid, knobRadius: 24)
-                .fill(Color.white.opacity(0.001))
-                .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
-
-            if hot {
-                switch edge.kind {
-                case .audio:
-                    Knob(gain: edge.gain)
-                        .position(mid)
-                        .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
-                        // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
-                        .gesture(
-                            DragGesture(minimumDistance: 3)
-                                .onChanged { v in
-                                    if editor.knobEdge == nil { editor.beginKnob(edge) }
-                                    editor.dragKnob(edge, translation: v.translation)
-                                }
-                                .onEnded { _ in editor.endKnob() }
-                        )
-                        .onTapGesture(count: 2) { editor.resetKnob(edge) }
-                        .help("Drag to set gain · double-click for unity")
-                case .stage:
-                    StageBadge()
-                        .position(mid)
-                        .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
-                        .help("Screen-share source. ⌫ to stop sharing this app.")
-                }
+        if hot {
+            switch edge.kind {
+            case .audio:
+                Knob(gain: edge.gain)
+                    .position(mid)
+                    // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
+                    .gesture(
+                        DragGesture(minimumDistance: 3)
+                            .onChanged { v in
+                                if editor.knobEdge == nil { editor.beginKnob(edge) }
+                                editor.dragKnob(edge, translation: v.translation)
+                            }
+                            .onEnded { _ in editor.endKnob() }
+                    )
+                    .onTapGesture(count: 2) { editor.resetKnob(edge) }
+                    .help("Drag to set gain · double-click for unity")
+            case .stage:
+                StageBadge()
+                    .position(mid)
+                    .help("Screen-share source. ⌫ to stop sharing this app.")
             }
         }
-    }
-}
-
-private struct EdgeHitShape: Shape {
-    var from: CGPoint, to: CGPoint, width: CGFloat, knob: CGPoint, knobRadius: CGFloat
-    func path(in rect: CGRect) -> Path {
-        var p = bezier(from: from, to: to).strokedPath(StrokeStyle(lineWidth: width, lineCap: .round))
-        p.addEllipse(in: CGRect(x: knob.x - knobRadius, y: knob.y - knobRadius, width: knobRadius * 2, height: knobRadius * 2))
-        return p
     }
 }
 

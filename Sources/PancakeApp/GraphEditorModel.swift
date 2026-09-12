@@ -146,8 +146,6 @@ final class GraphEditorModel: ObservableObject {
     private var dragStart: [NodeID: CGPoint] = [:]
     private var panStart: CGSize?
     private var knobGainStart: Float?
-    private var hoverClear: DispatchWorkItem?
-    private var edgeHoverClear: DispatchWorkItem?
 
     init(app: AppModel) {
         self.app = app
@@ -335,28 +333,76 @@ final class GraphEditorModel: ObservableObject {
     func endPan() { panStart = nil }
     func resetView() { pan = .zero }
 
-    // MARK: Node hover (sticky, so the floating delete bubble doesn't vanish as you reach for it)
+    // MARK: Hover — one geometric test over the whole canvas
 
-    func hoverNode(_ id: NodeID) { hoverClear?.cancel(); hoveredNode = id }
-    func unhoverNode(_ id: NodeID) {
-        hoverClear?.cancel()
-        let work = DispatchWorkItem { [weak self] in if self?.hoveredNode == id { self?.hoveredNode = nil } }
-        hoverClear = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    /// Given the pointer in canvas (screen) space, decide what's hovered. A single continuous tracker
+    /// drives this, so nothing — a full-canvas hit view, a knob sitting on a wire — can steal or block
+    /// hover. Nodes win over wires; a generous halo/disc keeps the delete bubble and knob reachable.
+    func hoverAt(_ p: CGPoint) {
+        if let id = nodeHit(p) {
+            if hoveredNode != id { hoveredNode = id }
+            if hoveredEdge != nil { hoveredEdge = nil }
+            return
+        }
+        if let eid = edgeHit(p) {
+            if hoveredEdge != eid { hoveredEdge = eid }
+            if hoveredNode != nil { hoveredNode = nil }
+            return
+        }
+        if hoveredNode != nil { hoveredNode = nil }
+        if hoveredEdge != nil && knobEdge == nil { hoveredEdge = nil }
     }
 
-    /// Sticky edge hover: the knob/badge sits *on top of* the wire's hit region, so crossing onto it
-    /// would otherwise toggle hover off→on and flicker. A short grace + hovering the knob keeping the
-    /// edge alive smooths it. Never clears while a knob drag is in flight.
-    func hoverEdge(_ id: String) { edgeHoverClear?.cancel(); hoveredEdge = id }
-    func unhoverEdge(_ id: String) {
-        edgeHoverClear?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            if self.hoveredEdge == id && self.knobEdge == nil { self.hoveredEdge = nil }
+    func hoverEnded() {
+        if hoveredNode != nil { hoveredNode = nil }
+        if hoveredEdge != nil && knobEdge == nil { hoveredEdge = nil }
+    }
+
+    private func nodeHit(_ p: CGPoint) -> NodeID? {
+        for n in gnodes {
+            guard let o = positions[n.id] else { continue }
+            // 14pt halo so the corner delete bubble still counts as "over the node".
+            let r = CGRect(x: o.x + pan.width - 14, y: o.y + pan.height - 14,
+                           width: GraphGeom.nodeWidth + 28, height: GraphGeom.nodeHeight + 28)
+            if r.contains(p) { return n.id }
         }
-        edgeHoverClear = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        return nil
+    }
+
+    private func edgeHit(_ p: CGPoint) -> String? {
+        var best: (String, CGFloat)?
+        for e in edges {
+            guard let (a, b) = edgeEndpoints(e) else { continue }
+            let from = CGPoint(x: a.x + pan.width, y: a.y + pan.height)
+            let to = CGPoint(x: b.x + pan.width, y: b.y + pan.height)
+            let mid = curveMidpoint(from, to)
+            let dm = hypot(p.x - mid.x, p.y - mid.y)
+            let d = dm <= 26 ? dm : distanceToCurve(p, from, to)   // knob/badge area counts as the edge
+            if d <= 16, best == nil || d < best!.1 { best = (e.id, d) }
+        }
+        return best?.0
+    }
+
+    private func curveMidpoint(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
+        let dx = max(40, abs(to.x - from.x) * 0.5)
+        let c1 = CGPoint(x: from.x + dx, y: from.y), c2 = CGPoint(x: to.x - dx, y: to.y)
+        return CGPoint(x: 0.125*from.x + 0.375*c1.x + 0.375*c2.x + 0.125*to.x,
+                       y: 0.125*from.y + 0.375*c1.y + 0.375*c2.y + 0.125*to.y)
+    }
+
+    private func distanceToCurve(_ p: CGPoint, _ from: CGPoint, _ to: CGPoint) -> CGFloat {
+        let dx = max(40, abs(to.x - from.x) * 0.5)
+        let c1 = CGPoint(x: from.x + dx, y: from.y), c2 = CGPoint(x: to.x - dx, y: to.y)
+        var best = CGFloat.greatestFiniteMagnitude
+        let n = 24
+        for i in 0...n {
+            let t = CGFloat(i) / CGFloat(n), u = 1 - t
+            let w0 = u*u*u, w1 = 3*u*u*t, w2 = 3*u*t*t, w3 = t*t*t
+            let x = w0*from.x + w1*c1.x + w2*c2.x + w3*to.x
+            let y = w0*from.y + w1*c1.y + w2*c2.y + w3*to.y
+            best = min(best, hypot(x - p.x, y - p.y))
+        }
+        return best
     }
 
     // MARK: Connecting
