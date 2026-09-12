@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import PancakeCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Geometry
 
@@ -140,6 +141,8 @@ final class GraphEditorModel: ObservableObject {
     @Published var hoveredEdge: String?     // BusEdge.id
     @Published var hoveredNode: NodeID?
     @Published var knobEdge: String?        // edge whose knob is being dragged (keeps it pinned open)
+    @Published var recordingNodes: Set<NodeID> = []       // recorder nodes currently capturing
+    @Published var recordElapsed: [NodeID: TimeInterval] = [:]
 
     /// A connection being dragged out of a node's port. `start`/`current` are in canvas (model) space.
     struct Pending { let from: NodeID; let fromIsSource: Bool; let start: CGPoint; var current: CGPoint }
@@ -149,6 +152,8 @@ final class GraphEditorModel: ObservableObject {
     private var dragStart: [NodeID: CGPoint] = [:]
     private var panStart: CGSize?
     private var knobGainStart: Float?
+    private var recordTimer: Timer?
+    private var recorderNextURL: [NodeID: URL] = [:]   // explicit destination chosen for the next take
     /// Latest pointer position in screen space — used to place a right-click-added node at the cursor.
     var lastPoint: CGPoint = .zero
     /// Canvas-space top-left for the next node added, consumed once by `placeNew` (set by right-click add).
@@ -336,6 +341,7 @@ final class GraphEditorModel: ObservableObject {
     func addOutputAtCursor(_ d: AudioDevice) { pendingPlacement = originForSpawn(); app.addOutputNode(d) }
     func addInputAtCursor(_ d: AudioDevice)  { pendingPlacement = originForSpawn(); app.addInputNode(d) }
     func addTapAtCursor(_ a: TappableApp)    { pendingPlacement = originForSpawn(); app.addTapNode(a) }
+    func addRecorder(atCursor: Bool)         { if atCursor { pendingPlacement = originForSpawn() }; app.addRecorderNode() }
 
     private func nodeOrder(_ a: GNode, _ b: GNode) -> Bool {
         func rank(_ n: GNode) -> Int {
@@ -531,7 +537,64 @@ final class GraphEditorModel: ObservableObject {
         if let n = hoveredNode { removeNode(n) }
     }
 
+    // MARK: Recording (recorder nodes)
+
+    func isRecording(_ id: NodeID) -> Bool { recordingNodes.contains(id) }
+
+    func toggleRecording(_ id: NodeID) {
+        if recordingNodes.contains(id) { stopRecording(id) } else { startRecording(id) }
+    }
+
+    private func startRecording(_ id: NodeID) {
+        let url = recorderNextURL[id] ?? RecordingLocation.defaultFile()
+        app.startRecording(id, to: url)
+        guard app.isRecording(id) else { return }   // engine refused (no slot / not running)
+        recorderNextURL[id] = nil
+        recordingNodes.insert(id)
+        recordElapsed[id] = 0
+        ensureRecordTimer()
+    }
+
+    private func stopRecording(_ id: NodeID) {
+        app.stopRecording(id)
+        recordingNodes.remove(id)
+        recordElapsed[id] = nil
+        if recordingNodes.isEmpty { recordTimer?.invalidate(); recordTimer = nil }
+    }
+
+    /// Pick a folder + filename for this recorder's next take (a WAV). Cleared once recording starts.
+    func chooseRecordingDestination(_ id: NodeID) {
+        let panel = NSSavePanel()
+        panel.title = "Save recording"
+        panel.prompt = "Choose"
+        panel.nameFieldLabel = "Save as:"
+        panel.directoryURL = RecordingLocation.defaultFolder
+        panel.nameFieldStringValue = RecordingLocation.defaultFile().lastPathComponent
+        panel.allowedContentTypes = [.wav]
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url { recorderNextURL[id] = url }
+    }
+
+    /// Whether a specific destination has been chosen for this recorder's next take.
+    func hasChosenDestination(_ id: NodeID) -> Bool { recorderNextURL[id] != nil }
+
+    private func ensureRecordTimer() {
+        guard recordTimer == nil else { return }
+        recordTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickRecordTimer() }
+        }
+    }
+
+    private func tickRecordTimer() {
+        for id in recordingNodes {
+            if let e = app.recordingElapsed(id) { recordElapsed[id] = e }
+            if !app.isRecording(id) { recordingNodes.remove(id); recordElapsed[id] = nil }  // engine stopped it
+        }
+        if recordingNodes.isEmpty { recordTimer?.invalidate(); recordTimer = nil }
+    }
+
     func removeNode(_ id: NodeID) {
+        if recordingNodes.contains(id) { stopRecording(id) }
         guard let d = descByID[id], !d.isPermanent else { return }
         // If this node is the current screen-share source, clearing stage removes the stage edge too.
         if case .graph(.tap(let b))? = descByID[id]?.kind, app.stageConfig.bundleID == b { app.setStageApp(nil) }

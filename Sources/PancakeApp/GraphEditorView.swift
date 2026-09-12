@@ -127,7 +127,7 @@ private struct GraphCanvas: View {
             if let origin = editor.positions[node.id] {
                 let center = CGPoint(x: origin.x + GraphGeom.nodeWidth / 2,
                                      y: origin.y + GraphGeom.nodeHeight / 2).offset(editor.pan)
-                NodeCard(node: node, hovered: editor.hoveredNode == node.id)
+                cardBody(node)
                     .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight)
                     .position(center)
                     .gesture(
@@ -136,6 +136,14 @@ private struct GraphCanvas: View {
                             .onEnded { _ in editor.endNodeDrag(node.id) }
                     )
             }
+        }
+    }
+
+    @ViewBuilder private func cardBody(_ node: GNode) -> some View {
+        if case .graph(.recorder) = node.kind {
+            RecorderCard(editor: editor, node: node, hovered: editor.hoveredNode == node.id)
+        } else {
+            NodeCard(node: node, hovered: editor.hoveredNode == node.id)
         }
     }
 
@@ -410,6 +418,69 @@ private struct NodeCard: View {
     }
 }
 
+/// A recorder sink: the usual card, but its second line is a transport — a record/stop button, the
+/// elapsed time while capturing, and a folder button to choose where the next take is saved.
+private struct RecorderCard: View {
+    @ObservedObject var editor: GraphEditorModel
+    let node: GNode
+    let hovered: Bool
+
+    private var color: Color { GraphPalette.color(for: node.kind) }
+    private var recording: Bool { editor.isRecording(node.id) }
+    private var elapsed: TimeInterval { editor.recordElapsed[node.id] ?? 0 }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(color.opacity(0.9))
+                Image(systemName: "recordingtape").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+            }
+            .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(node.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 7) {
+                    Button(action: { editor.toggleRecording(node.id) }) {
+                        Image(systemName: recording ? "stop.circle.fill" : "record.circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(color)
+                            .symbolEffect(.pulse, isActive: recording)
+                    }
+                    .buttonStyle(.plain)
+                    .help(recording ? "Stop recording" : "Start recording")
+                    Text(recording ? timeString(elapsed) : "ready")
+                        .font(.system(size: 10, weight: .medium, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(recording ? color : .secondary)
+                    Spacer(minLength: 0)
+                    Button(action: { editor.chooseRecordingDestination(node.id) }) {
+                        Image(systemName: editor.hasChosenDestination(node.id) ? "folder.fill" : "folder")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(recording)
+                    .help("Choose where to save the next recording (default: ~/Music/Pancake)")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous)
+                .stroke(recording || hovered ? color : Color.primary.opacity(0.10), lineWidth: recording || hovered ? 1.8 : 1)
+        )
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2).fill(color)
+                .frame(width: 3.5, height: GraphGeom.nodeHeight - 18).padding(.leading, 4).opacity(0.9)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
+    }
+
+    private func timeString(_ t: TimeInterval) -> String {
+        let s = Int(t)
+        return String(format: "%02d:%02d", s / 60, s % 60)
+    }
+}
+
 /// Floating delete affordance à la iOS home-screen jiggle (minus the jiggle): a small dark bubble
 /// with a ✕, sat on the node's corner. Lives in a top layer so it's always clickable.
 private struct DeleteBubble: View {
@@ -522,8 +593,11 @@ private func addNodeItems(app: AppModel, editor: GraphEditorModel, atCursor: Boo
     let existingTaps = Set(app.graph.micTapBundleIDs)
     let apps = tappableApps().filter { !existingTaps.contains($0.bundleID) }
 
+    Section("Capture") {
+        Button { editor.addRecorder(atCursor: atCursor) } label: { Label("Recorder", systemImage: "recordingtape") }
+    }
     if outs.isEmpty && ins.isEmpty && apps.isEmpty {
-        Text("Everything here is already on the canvas")
+        Text("All devices are already on the canvas")
     }
     if !outs.isEmpty {
         Section("Output devices") {

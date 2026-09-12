@@ -449,6 +449,24 @@ final class AppModel: ObservableObject {
     func addOutputNode(_ d: AudioDevice) { addNode(.output(d.uid, label: d.name)) }
     func addInputNode(_ d: AudioDevice) { addNode(.input(d.uid, label: d.name)) }
     func addTapNode(_ a: TappableApp) { addNode(.tap(a.bundleID, label: a.name)) }
+    func addRecorderNode() { addNode(.recorder()) }
+
+    // MARK: Recording (a .recorder node captures whatever's wired into it to a file)
+
+    func startRecording(_ node: NodeID, to url: URL) {
+        do { try engine.startRecording(node: node, to: url) }
+        catch { Log.warn("start recording \(node): \(error)") }
+    }
+    func stopRecording(_ node: NodeID) { engine.stopRecording(node) }
+    func isRecording(_ node: NodeID) -> Bool { engine.isRecording(node) }
+    func recordingElapsed(_ node: NodeID) -> Double? { engine.recordingElapsed(node) }
+
+    /// Reveal the recordings folder in Finder (creating it if it doesn't exist yet).
+    func showRecordingsFolder() {
+        let folder = RecordingLocation.defaultFolder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(folder)
+    }
 
     private func addNode(_ node: Node) {
         var g = graph

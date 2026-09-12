@@ -77,6 +77,7 @@ struct MenuContent: View {
 
             MenuRow(action: { model.rebuildRouting() }) { ActionLabel("Rebuild audio routing", "arrow.triangle.2.circlepath") }
             MenuRow(action: { showGraph() }) { ActionLabel("Show graph…", "point.3.connected.trianglepath.dotted") }
+            MenuRow(action: { model.showRecordingsFolder() }) { ActionLabel("Show recordings folder", "folder") }
             MenuRow(action: { model.openLog() }) { ActionLabel("Show log", "list.bullet.rectangle") }
             MenuRow(action: { model.toggleLaunchAtLogin() }) {
                 HStack(spacing: 10) {
