@@ -176,7 +176,9 @@ because the ring lives in the context, not the matrix.
    — a connection is a whole stereo/mono bus, drawn as bundled strands, never split). Drag between
    ports to route; the mapping is chosen for you (mono fans to both, stereo sums to mono, else
    straight). Wires draw in one `Canvas` with a **colour gradient** blending the source node's hue into
-   the sink's; live edges solid, waiting edges dashed + dim. **Gain is an in-place knob**: hover a wire,
+   the sink's (blended in **OKLCH** — `ColorBlend.swift` — so cross-wheel pairs stay vivid instead of
+   greying out in the middle; Mixbox was declined as CC-BY-NC/GPL-incompatible); live edges solid,
+   waiting edges dashed + dim. **Gain is an in-place knob**: hover a wire,
    a **ring-gauge knob** (arc open at the bottom, filled to the current gain, dB in the centre) appears
    at its midpoint — drag to set gain, double-click for unity. `⌫` removes the hovered wire (or hovered
    node; nodes also have a hover ✕). **Re-drawing a wire that already exists removes it** (toggle) — that

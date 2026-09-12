@@ -218,7 +218,7 @@ private struct WiresCanvas: View {
                 let hot = hovered == e.id
                 let offsets: [CGFloat] = e.strands >= 2 ? [-2.6, 2.6] : [0]
                 let shading = GraphicsContext.Shading.linearGradient(
-                    Gradient(colors: [e.c0, e.c1]), startPoint: e.from, endPoint: e.to)
+                    ColorBlend.oklch(e.c0, e.c1), startPoint: e.from, endPoint: e.to)
                 let style = StrokeStyle(lineWidth: hot ? 3.4 : 2.4, lineCap: .round, dash: e.live ? [] : [5, 6])
                 ctx.opacity = e.live ? 1 : 0.5
                 for off in offsets {
@@ -312,8 +312,9 @@ private struct Knob: View {
     let c0: Color      // wire's left (source) hue
     let c1: Color      // wire's right (sink) hue
     private var fraction: CGFloat { CGFloat((min(12, max(-48, GainMath.dB(gain))) + 48) / 60) }
-    /// The wire's own gradient, left-to-right across the knob — worn by both the filled arc and text.
-    private var wire: LinearGradient { LinearGradient(colors: [c0, c1], startPoint: .leading, endPoint: .trailing) }
+    /// The wire's own gradient (blended in OKLCH, like the wires), left-to-right across the knob —
+    /// worn by both the filled arc and the dB text.
+    private var wire: LinearGradient { LinearGradient(gradient: ColorBlend.oklch(c0, c1), startPoint: .leading, endPoint: .trailing) }
 
     var body: some View {
         ZStack {
