@@ -1685,6 +1685,7 @@ static OSStatus	Pancake_GetPlugInPropertyData(AudioServerPlugInDriverRef inDrive
 			
 			CFStringRef deviceUID = get_device_uid();
             CFStringRef device2UID = get_device2_uid();
+            CFStringRef device3UID = get_device3_uid();
 
 			if(CFStringCompare(*((CFStringRef*)inQualifierData), deviceUID, 0) == kCFCompareEqualTo)
 			{
@@ -1694,6 +1695,10 @@ static OSStatus	Pancake_GetPlugInPropertyData(AudioServerPlugInDriverRef inDrive
             {
                 *((AudioObjectID*)outData) = kObjectID_Device2;
             }
+            else if(CFStringCompare(*((CFStringRef*)inQualifierData), device3UID, 0) == kCFCompareEqualTo)
+            {
+                *((AudioObjectID*)outData) = kObjectID_Device3;
+            }
 			else
 			{
 				*((AudioObjectID*)outData) = kAudioObjectUnknown;
@@ -1701,6 +1706,7 @@ static OSStatus	Pancake_GetPlugInPropertyData(AudioServerPlugInDriverRef inDrive
 			*outDataSize = sizeof(AudioObjectID);
 			CFRelease(deviceUID);
             CFRelease(device2UID);
+            CFRelease(device3UID);
 			break;
 			
 		case kAudioPlugInPropertyResourceBundle:
@@ -2879,7 +2885,7 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                 case kObjectID_Device2:
                     for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
                     {
-                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
+                        if ((kDevice2_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice2_ObjectList[i].id==kObjectID_Pitch_Adjust))
                         {
                             ((AudioObjectID*)outData)[k++] = kDevice2_ObjectList[i].id;
                         }
@@ -2889,7 +2895,7 @@ static OSStatus	Pancake_GetDevicePropertyData(AudioServerPlugInDriverRef inDrive
                 case kObjectID_Device3:
                     for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
                     {
-                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
+                        if ((kDevice3_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice3_ObjectList[i].id==kObjectID_Pitch_Adjust))
                         {
                             ((AudioObjectID*)outData)[k++] = kDevice3_ObjectList[i].id;
                         }
