@@ -90,8 +90,14 @@ private struct GraphCanvas: View {
                 DotGrid(pan: editor.pan)
                     .contentShape(Rectangle())
                     .gesture(DragGesture().onChanged { editor.panBy($0.translation) }.onEnded { _ in editor.endPan() })
-                    // Right-click empty canvas → add a node right where you clicked.
-                    .contextMenu { addNodeItems(app: app, editor: editor, atCursor: true) }
+                    // Right-click over a wire → Remove; over empty canvas → add a node at the cursor.
+                    .contextMenu {
+                        if let eid = editor.hoveredEdge ?? editor.edgeUnderCursor() {
+                            Button("Remove", role: .destructive) { editor.removeEdge(eid) }
+                        } else {
+                            addNodeItems(app: app, editor: editor, atCursor: true)
+                        }
+                    }
 
                 WiresCanvas(edges: draws, hovered: editor.hoveredEdge)
 
@@ -268,7 +274,6 @@ private struct EdgeInteractor: View {
             switch edge.kind {
             case .audio:
                 Knob(gain: edge.gain, c0: wireColors.0, c1: wireColors.1)
-                    .position(mid)
                     // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
                     .gesture(
                         DragGesture(minimumDistance: 3)
@@ -279,11 +284,14 @@ private struct EdgeInteractor: View {
                             .onEnded { _ in editor.endKnob() }
                     )
                     .onTapGesture(count: 2) { editor.resetKnob(edge) }
+                    .contextMenu { Button("Remove", role: .destructive) { editor.removeEdge(edge.id) } }
                     .help("Drag to set gain · double-click for unity")
+                    .position(mid)
             case .stage:
                 StageBadge()
-                    .position(mid)
+                    .contextMenu { Button("Remove", role: .destructive) { editor.removeEdge(edge.id) } }
                     .help("Screen-share source. ⌫ to stop sharing this app.")
+                    .position(mid)
             }
         }
     }

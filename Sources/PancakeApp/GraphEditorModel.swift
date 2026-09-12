@@ -501,6 +501,21 @@ final class GraphEditorModel: ObservableObject {
     func endKnob() { knobEdge = nil; knobGainStart = nil }
     func resetKnob(_ e: BusEdge) { app.setBusGain(from: e.from, to: e.to, gain: 1) }
 
+    /// Remove one edge by id — used by the wire right-click menu, independent of hover state (which a
+    /// context menu opening can clear out from under us).
+    func removeEdge(_ id: String) {
+        guard let e = edges.first(where: { $0.id == id }) else { return }
+        switch e.kind {
+        case .stage: app.setStageApp(nil)                       // stop streaming this app
+        case .audio: app.disconnectBus(from: e.from, to: e.to)
+        }
+        if hoveredEdge == id { hoveredEdge = nil }
+    }
+
+    /// The edge under the pointer, recomputed geometrically from the last cursor position — a robust
+    /// signal for the right-click menu that doesn't depend on the (transient) hover state.
+    func edgeUnderCursor() -> String? { edgeHit(lastPoint) }
+
     func deleteHovered() {
         if let id = hoveredEdge, let e = edges.first(where: { $0.id == id }) {
             switch e.kind {
