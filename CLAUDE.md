@@ -13,14 +13,15 @@ thing.*
   Everything builds with `swift build` + `clang`; the driver is ad-hoc signed.
 - `timeout` doesn't exist. To run the engine for N seconds: start it in the background,
   `sleep N`, `kill -INT <pid>` (SIGINT shuts down cleanly and destroys the aggregate).
-- **The nix `audio-defaults` launchd agent is gone** (removed from `home.nix` 2026-09-11, `home-manager switch`d).
-  It used to hard-pin output to Loopback and shove input off Bluetooth; pancake now does both — output via
-  the default-output pin/follow, input via the **input lock** (`policy.lockInput` → the engine pins the
-  system default input to the device feeding Pancake Mic and re-asserts it on `defaultInputChanged`). The
-  old `~/.config/audio-pin-off` escape hatch no longer exists and isn't needed. If anything ever re-pins the
-  default output on its own again, check `launchctl list | grep audio` — it should be empty of our stuff.
-- Loopback 2.4.10 is still installed and is the fallback. Don't uninstall it — `MIGRATION.md`.
-- The AirPods (`F0-04-E1-C9-6A-F8:output`, name `AÀÂÃÅÄĄ`) come and go; the phone steals them.
+- pancake does the output *and* input pinning itself: output via the default-output pin/follow, input via
+  the **input lock** (`policy.lockInput` → the engine pins the system default input to the device feeding
+  Pancake Mic and re-asserts it on `defaultInputChanged`). If anything *else* on the machine re-pins the
+  default output on a timer (a login agent, another virtual-audio app), it'll fight pancake — check
+  `launchctl list | grep audio` and disable it.
+- pancake needs no other virtual-audio app to run; it ships its own driver. If Loopback or similar is
+  installed nothing conflicts, but pancake doesn't depend on it — it was only a bring-up fallback.
+- A Bluetooth output device (AirPods and the like, UID such as `AA-BB-CC-DD-EE-FF:output`) can come and go
+  — a paired phone can steal it; the engine asks for a reconnect but can't force one.
 
 ## Commands
 
@@ -133,7 +134,7 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
   choose otherwise. Quit it via the menu's **Stop screen share** or `make stop-stage`.
 - The AirPods' *own* hardware volume (elements 1+2, no element 0) is rewritten by the iPhone when it
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
-  just makes everything quiet (found at 0.5). `swift tools/setvol.swift F0-04-E1-C9-6A-F8:output 1.0`
+  just makes everything quiet (found at 0.5). `swift tools/setvol.swift AA-BB-CC-DD-EE-FF:output 1.0`
   is the manual fix; the engine should hold the routed device at unity — see next steps.
 
 ## Not yet verified / next steps, in order
@@ -153,7 +154,7 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
    per-app needs process taps.
 4. Process taps → `tap` nodes (TCC "System Audio Recording Only"). `CATapDescription` on macOS 26 has
    `bundleIDs`, so taps can be declared by bundle id rather than pid.
-5. Sleep/wake soak. Sample-rate change on the master (e.g. DDJ-FLX4 at 44.1k) → rebuild path is
+5. Sleep/wake soak. Sample-rate change on the master (e.g. a 44.1 kHz interface) → rebuild path is
    untested.
 6. ✅ **Graph window** — the menu's **Show graph…** opens a pipewire-style patchbay
    (`Sources/PancakeApp/GraphEditor*.swift`). Sources (Pancake, inputs, app taps) on the left, sinks

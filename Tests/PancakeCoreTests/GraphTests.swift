@@ -32,7 +32,7 @@ import Testing
     }
 
     @Test func jsonRoundTripAndShape() throws {
-        var g = Graph.stereoOutput("F0-04-E1-C9-6A-F8:output", label: "AirPods")
+        var g = Graph.stereoOutput("AA-BB-CC-DD-EE-FF:output", label: "AirPods")
         g.upsert(.mic)
         g.upsert(.input("BuiltInMicrophoneDevice", label: "MacBook Pro Microphone"))
         g.connect(Port("in:BuiltInMicrophoneDevice", 0), Port(Graph.micID, 0))
@@ -40,7 +40,7 @@ import Testing
         let text = try g.jsonString()
         let compact = text.filter { $0 != " " && $0 != "\n" }   // pretty-printing adds whitespace
         #expect(compact.contains(#""type":"output""#), Comment(rawValue: text))
-        #expect(compact.contains(#""device":"F0-04-E1-C9-6A-F8:output""#), Comment(rawValue: text))
+        #expect(compact.contains(#""device":"AA-BB-CC-DD-EE-FF:output""#), Comment(rawValue: text))
         #expect(!compact.contains("deviceUID"), "hand-written Codable should be in effect")
         let back = try Graph(jsonString: text)
         #expect(back == g)

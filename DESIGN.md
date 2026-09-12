@@ -108,7 +108,7 @@ otherwise be silent).
 
 **The graph file is the IPC.** `~/.config/pancake/graph.json`, watched by the
 running engine. The menu bar, the CLI and a text editor all just write it. Keeps
-the daemon dumb and the config home-manager-able.
+the daemon dumb and the config a plain, version-controllable file.
 
 ### The hard problem: clock drift
 
@@ -177,8 +177,8 @@ ignores notifications that don't change it.
 ### Follow the default output
 
 macOS moves the default output device around on its own — to AirPods when they
-connect, back to the speakers when they leave — and that's the very behaviour
-that made `audio-defaults` necessary. pancake turns it into a feature: the engine
+connect, back to the speakers when they leave — and that churn is exactly the
+problem. pancake turns it into a feature: the engine
 listens for default-output changes, and when the new default is a *physical*
 output it routes `hub → that device` and pins the default back to the hub. The
 result is that Control Center's output picker *is* pancake's picker, and AirPods
@@ -215,8 +215,8 @@ Opens from the menu. Nodes for apps / devices / the virtual device, ports for
 channels, bezier links you drag. Per-link gain lives here and nowhere else.
 
 SwiftUI `Canvas` plus draggable node views is enough — this doesn't need a graph
-framework. Persist to `~/.config/pancake/graph.toml`, human-editable and
-version-controllable, so it can be managed from home-manager with everything else.
+framework. Persist to `~/.config/pancake/graph.json`, human-editable and
+version-controllable.
 
 **Be honest that this half is where scope dies.** The engine is a bounded problem;
 a graph editor is not. Ship the menu bar first and live on it for a while.
@@ -275,15 +275,13 @@ fighting it — the same log line is where you'd find out.
 | M5 | Process taps as graph sources — `tap` node exists in the model; engine skips it | 3–5 days |
 | M6 | Graph window | open-ended — scope carefully |
 
-M1–M4 is a tool worth using daily, and supersedes the `audio-defaults` agent —
-pinning the system output becomes unnecessary once it points at a device that
-never disappears.
+M1–M4 is a tool worth using daily: pinning the system output becomes unnecessary
+once it points at a device that never disappears.
 
-**Before starting M1, read `MIGRATION.md`.** That agent hard-pins system output to
-`"Loopback Audio"` every few seconds and will fight pancake throughout bring-up,
-which presents as "pancake doesn't work." `touch ~/.config/audio-pin-off`
-suspends it. `MIGRATION.md` also covers what else has to come out, and the order
-to do it in.
+**Watch out for anything else that pins the default output.** If some other tool
+(a login agent, another virtual-audio app on a timer) keeps re-asserting the
+system default output, it will fight pancake throughout bring-up and present as
+"pancake doesn't work." Disable it first.
 
 ## Risks
 

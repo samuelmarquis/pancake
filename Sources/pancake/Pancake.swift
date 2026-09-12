@@ -56,8 +56,6 @@ struct Status: ParsableCommand {
         print("default input:         \(name(AudioDevice.defaultInputID))")
         let hub = AudioDevice.find(uid: "Pancake_UID"), mic = AudioDevice.find(uid: "PancakeMic_UID")
         print("Pancake.driver:        \(hub != nil ? "loaded (\(hub!.name))" : "NOT loaded") \(mic != nil ? "+ Pancake Mic" : "")")
-        let pinOff = FileManager.default.fileExists(atPath: NSString(string: "~/.config/audio-pin-off").expandingTildeInPath)
-        print("audio-defaults agent:  output pin \(pinOff ? "suspended (~/.config/audio-pin-off present)" : "ACTIVE — will fight pancake; touch ~/.config/audio-pin-off")")
         print("graph file:            \(config.store.url.path) \(FileManager.default.fileExists(atPath: config.store.url.path) ? "" : "(missing)")")
         if let g = try? config.store.load() {
             print("graph outputs:         \(g.hubOutputDeviceUIDs)")

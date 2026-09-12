@@ -3,8 +3,8 @@ import Foundation
 /// Reads and writes the graph file, and watches it for edits.
 ///
 /// The file *is* the IPC: the menu bar, the CLI and a text editor all just write it, and the
-/// running engine picks the change up. That keeps the daemon dumb and the config version-
-/// controllable from home-manager.
+/// running engine picks the change up. That keeps the daemon dumb and the config a plain,
+/// version-controllable JSON file.
 extension Graph {
     /// The on-disk representation: pretty-printed, keys sorted, so diffs stay readable.
     public func jsonData() throws -> Data {

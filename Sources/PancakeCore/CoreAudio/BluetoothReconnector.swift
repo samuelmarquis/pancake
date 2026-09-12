@@ -5,7 +5,7 @@ import IOBluetooth
 /// AirPods back" means in practice: the equivalent of `blueutil --connect`. Whether the
 /// AirPods come is up to them (and the phone holding them); we can only ask.
 public enum BluetoothReconnector {
-    /// Bluetooth device UIDs look like `F0-04-E1-C9-6A-F8:output`. Returns the address part.
+    /// Bluetooth device UIDs look like `AA-BB-CC-DD-EE-FF:output`. Returns the address part.
     public static func address(fromDeviceUID uid: String) -> String? {
         let head = uid.split(separator: ":", maxSplits: 1).first.map(String.init) ?? uid
         let parts = head.split(separator: "-")

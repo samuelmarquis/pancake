@@ -1,7 +1,9 @@
 # 🥞 pancake
 
-A macOS status bar item you click to pick your output device — backed by a real
-routing engine, and expandable into a PipeWire-style graph when you want it.
+A macOS menu-bar audio router. Click the menu-bar icon to pick your output
+device — or open the graph and wire your audio however you like: apps → speakers,
+a microphone → Discord, one app's audio → a screen share, all at once, with
+per-connection gain you can actually see.
 
 Named for the fact that it's an audio **stack**. There was going to be a second
 half to that pun involving panning, but panning turned out to be useless here, so
@@ -9,70 +11,92 @@ the name is now simply a name. Pancakes remain good.
 
 ## Why this exists
 
-Loopback does all of this and more, but its per-monitor gain silently resets
-itself — verified, see `NOTES.md`. That gain is internal Loopback state with no
-CoreAudio surface, no AppleScript hook, and no preference controlling it, so it
-cannot be pinned from outside the app. pancake designs the failure mode out: gains
-are explicit, visible in the graph, and never written by the program.
+Loopback does most of this and more, but its per-monitor gain silently resets
+itself (measured — see `NOTES.md`), and that gain is internal Loopback state with
+no CoreAudio surface, no AppleScript hook, and no preference controlling it, so it
+can't be pinned from outside the app. pancake designs the failure mode out: gains
+are **explicit, visible in the graph, and never written by the program** — only by
+you. The routing engine underneath is a real one (an aggregate device with a
+lock-free C mixing matrix), so once it's wired it just runs.
 
-The other reason is that `SwitchAudioSource` and a menu bar list would be a
-weekend, but wouldn't get you a graph.
+It's also a menu-bar output switcher that survives the things that usually break
+them: AirPods stolen by your phone, hot-plugged interfaces, Control Center
+switching output out from under you.
 
-## Status
+## What it does
 
-**Foundation laid (2026-09-11).** Builds and runs with Command Line Tools alone.
+pancake installs three virtual audio devices and routes between them and your real
+hardware:
 
-| Piece | State |
+| Device | What it's for |
 |---|---|
-| `driver/` — `Pancake.driver`, two virtual devices | **installed and loaded** (ad-hoc signature is fine on 26.3) |
-| `Sources/PancakeCore` — CoreAudio wrappers, graph model, engine | **daily-driver quality for output switching**: pinning, follow, hot-plug, mute-on-loss, Bluetooth reconnect |
-| `Sources/pancake` — CLI: `devices`, `status`, `run`, `set-output`, `graph`, `probe-aggregate` | works |
-| `Sources/PancakeApp` — menu bar app | **works** (audible end-to-end): output picker, status line, reconnect, log. Needs the Microphone grant it asks for at launch |
-| process taps (per-app sources) | modelled in the graph, not wired into the engine |
-| Pancake Mic (Discord feed) | device exists; nothing routes into it yet — needs graph links, no code |
-| graph window | not started |
+| **Pancake** | The system output. Apps play here; it carries the volume control (the volume keys drive it). |
+| **Pancake Mic** | A virtual input. Wire real mics and app audio into it; Discord/Zoom/etc. record it. |
+| **Pancake Program** | A silent bus the screen-share helper renders one chosen app into, so you can share *one app's* audio cleanly. |
 
-## Build
+From the menu bar you get: an output picker (Control Center's picker works too —
+the engine follows it), a volume slider, input selection for Pancake Mic, output/
+input locks, "Reconnect" for stolen Bluetooth, screen-share start/stop, and
+**Start at login**.
+
+### The graph
+
+**Show graph…** opens a PipeWire-style patchbay:
+
+- **Sources** on the left (Pancake, real inputs, per-app process taps), **sinks**
+  on the right (real outputs, Pancake Mic, Pancake Program). Drag between ports to
+  route; drag a wire that already exists to remove it.
+- **Stereo/mono is fungible** — one bus port per node, drawn as bundled strands;
+  the channel mapping (mono fans to both, stereo sums to mono) is chosen for you.
+- **Wires blend colour** from the source node's hue to the sink's. Live links are
+  solid; links waiting on an absent device are dashed.
+- **Gain is a knob on the wire** — hover a wire, a ring-gauge knob appears at its
+  midpoint; drag to set gain, double-click for unity. `⌫` or right-click → Remove
+  deletes a wire; nodes get a hover ✕.
+- **Add nodes** from the top bar or by right-clicking the canvas (drops at the
+  cursor). Drag nodes around; **Tidy** snaps them to the grid.
+- **Screen share is part of the graph**: wire an app's tap → **Pancake Program**
+  and the helper streams that app. (Verified live: a Discord window-share of one
+  app's audio, friends heard it clearly, no echo.)
+
+Node positions live in `~/.config/pancake/graph-layout.json`; the routing itself
+is `~/.config/pancake/graph.json`, which is the source of truth — the menu, the
+graph editor, the CLI, and a text editor all just write that file, and the running
+engine picks the change up.
+
+## Requirements
+
+- **Apple Silicon Mac**, built and run on **macOS 26.3**. Per-app capture uses
+  CoreAudio process taps (macOS 14.2+).
+- **Command Line Tools** only — no Xcode, no paid signing identity. Everything is
+  built with `swift build` + `clang` and ad-hoc signed.
+- The app asks for **Microphone** access on first launch — allow it. Reading audio
+  out of the Pancake device is "microphone access" as far as macOS is concerned,
+  and without it the app routes silence with no error.
+
+## Build & install
 
 ```sh
-make build            # PancakeCore + the pancake CLI → .build/debug/pancake
-make test             # unit tests
-make driver           # driver/build/Pancake.driver
-sudo make install-driver   # → /Library/Audio/Plug-Ins/HAL, restarts coreaudiod
-make app              # build/Pancake.app — the menu bar app
-make run-app          # launch it;  make stop-app quits it cleanly
+make driver                 # → driver/build/Pancake.driver
+sudo make install-driver    # → /Library/Audio/Plug-Ins/HAL, restarts coreaudiod (needs your password)
+make app                    # → build/Pancake.app (the menu-bar app)
+make stage                  # → build/PancakeStage.app (the screen-share helper)
+make install-app            # copies both to ~/Applications (stable paths, no sudo)
+open ~/Applications/Pancake.app
 ```
 
-No Xcode required, and there isn't one on this machine. `make test` passes the
-flags Command Line Tools need to find swift-testing; plain `swift test` won't.
+Then use the menu's **Start at login** if you want it always on. Installing the
+driver restarts `coreaudiod`, which drops every audio stream on the machine for
+about a second; apps reconnect on their own.
 
-## Use it
+There's also a CLI for scripting and debugging:
 
-`make run-app`. The menu bar item lists output devices; pick one. That's the product.
-
-The first launch asks for **Microphone** access — allow it. Reading audio out of the
-Pancake device is "microphone access" as far as macOS is concerned, and without it
-the app routes silence with no error. Every `make app` re-signs the bundle, which
-resets that grant, so expect the prompt again after a rebuild.
-
-What it does while it sits there:
-
-- **System output is pinned to `Pancake`**, so nothing can steal it. The engine
-  routes Pancake to whatever you picked.
-- **Control Center's output picker still works** — the engine follows it, routes
-  there, and pins back. AirPods connecting routes to them automatically.
-- **If your output vanishes** (AirPods to the phone), you get **silence**, not
-  speakers. When audio starts playing again, the engine asks Bluetooth to bring
-  the AirPods back, every 8 s, until they're listed. The menu also has a
-  "Reconnect" item.
-- **Volume keys** drive Pancake's own volume control. Nothing else ever touches a gain.
-- **Quitting hands the default output back** to whatever it was feeding.
-
-The graph file (`~/.config/pancake/graph.json`) is the source of truth: the CLI's
-`pancake set-output <name>` and a text editor both change a running app's routing.
-Log at `~/Library/Logs/pancake.log`.
-
-The engine also runs without the app: `.build/debug/pancake run --output "MacBook Pro Speakers" --stats 5`.
+```sh
+make build                  # → .build/debug/pancake
+.build/debug/pancake status | devices [--all] | graph | set-output <name>
+.build/debug/pancake run --output "MacBook Pro Speakers" --stats 5   # engine without the app
+make test                   # unit tests (passes the flags CLT needs for swift-testing)
+```
 
 ## Layout
 
@@ -84,24 +108,40 @@ Sources/
     CoreAudio/     typed property access, device snapshots, aggregate devices, HAL listeners
     Graph/         Node / Link / Graph, JSON persistence, file watcher
     Engine/        aggregate build/teardown, channel layout, matrix compiler, the engine
+    Stage/         screen-share config + tappable-app discovery
   pancake/         the CLI
-  PancakeApp/      the menu bar app (SwiftUI MenuBarExtra; engine runs in-process)
-packaging/         Info.plist for the .app bundle
-Tests/             graph + matrix compiler tests, plus a live-HAL sanity test
-tools/             standalone CoreAudio probes from the Loopback investigation
+  PancakeApp/      the menu-bar app + the graph editor (SwiftUI)
+  PancakeStage/    the faceless screen-share helper
+packaging/         Info.plist for the .app bundles
+Tests/             graph + matrix-compiler tests, plus a live-HAL sanity test
+tools/             standalone CoreAudio probes
 ```
 
 ## Scope
 
-**In:** virtual output device, graph-driven routing engine, menu bar output
-switcher, per-app capture via process taps, hot-plug survival, a graph editor.
+**In:** three virtual devices, a graph-driven routing engine, a menu-bar output
+switcher, per-app capture via process taps, single-app screen-share audio,
+hot-plug/Bluetooth survival, and the visual graph editor.
 
-**Out:** plugin hosting, recording UI, anything resembling full Loopback parity.
-If you need those, buy Loopback — it's good, and this isn't trying to replace it.
+**Out:** plugin (AU/VST/CLAP) inserts — the C IOProc is pure `out += in*gain` with
+no allocation or locks, and hosting a plugin means calling its render inside that
+callback (a separate project; see `DESIGN.md` and `TODO.md`). Also out: a
+recording UI, and full Loopback parity. If you need those, buy Loopback — it's
+good, and this isn't trying to replace it.
+
+## Licence
+
+pancake is **GPL-3.0** — see `LICENSE`. The HAL driver under `driver/` is a fork
+of [BlackHole](https://github.com/ExistentialAudio/BlackHole) (© Existential Audio
+Inc.), also GPL-3.0; see `driver/LICENSE`. The Swift app, CLI and engine share no
+code with the driver — they talk to it only across the CoreAudio process boundary.
+The BlackHole name and branding belong to Existential Audio and aren't used by
+pancake's devices.
 
 ## Read next
 
 - `DESIGN.md` — architecture, the graph model, the clock-drift decision, what's been learned
-- `MIGRATION.md` — what has to be ripped out when Loopback goes, and in what order
-- `NOTES.md` — what was measured about Loopback, and how
-- `CLAUDE.md` — working notes for the next session (commands, gotchas)
+- `NOTES.md` — what was measured about Loopback's volume behaviour, and how
+- `CLAUDE.md` — operational notes (commands, invariants, gotchas)
+- `TODO.md` — scoped-but-unbuilt ideas (summing-bus node, in-bus compressor)
+```

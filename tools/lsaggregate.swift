@@ -1,7 +1,7 @@
 // List aggregate devices and their sub-devices.
 //   swift lsaggregate.swift
 // Useful for spotting aggregates that depend on a virtual device you're about
-// to remove (see ../MIGRATION.md).
+// to remove.
 import Foundation
 import CoreAudio
 

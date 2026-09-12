@@ -48,7 +48,7 @@ volume / has mute, `t` = transport (`blue` bluetooth, `bltn` built-in), `n` name
 Observed on this machine:
 
 ```
-'AÀÂÃÅÄĄ'              v=1                    enabled=True
+'AirPods'              v=1                    enabled=True
 'JBL Charge 5'         v=0.3779526948928833   enabled=False
 'MacBook Pro Speakers' v=1                    enabled=False
 ```
@@ -63,7 +63,7 @@ outside Loopback via CoreAudio. **It is not.**
 
 1. Set `BuiltInSpeakerDevice` hardware volume → `0.42` via CoreAudio.
    Loopback did not react. (Weak: that monitor was disabled.)
-2. Set the AirPods (`F0-04-E1-C9-6A-F8:output`) hardware volume → `0.50`, on the
+2. Set the AirPods (`AA-BB-CC-DD-EE-FF:output`) hardware volume → `0.50`, on the
    **enabled** monitor. Loopback neither reflected it nor rewrote `Devices.plist`
    within 12 s. (Both restored to 1.0 afterwards.)
 
@@ -92,7 +92,7 @@ a fix from them would be free.
 
 ## Incidental findings
 
-- AirPods are `F0-04-E1-C9-6A-F8:output`, transport `blue`, and expose volume on
+- AirPods are `AA-BB-CC-DD-EE-FF:output`, transport `blue`, and expose volume on
   elements 1 and 2 (no element-0 main control). Anything setting their volume must
   iterate elements rather than assuming element 0.
 - `MacBook Pro Speakers` (`BuiltInSpeakerDevice`) exposes element 0 only.
