@@ -403,7 +403,13 @@ final class AppModel: ObservableObject {
         guard g.node(id) == nil else { return }
         if id == Graph.hubID { g.upsert(.hub) }
         else if id == Graph.micID { g.upsert(.mic) }
-        // Device and tap nodes are added through the palette before they can be wired, so they exist.
+        else if id.rawValue.hasPrefix("tap:") {
+            // A tap that exists only as the screen-share source (synthesized from stage.json) can be
+            // wired into the audio graph too; materialize it here from its id.
+            let b = String(id.rawValue.dropFirst("tap:".count))
+            g.upsert(.tap(b, label: stageApps.first { $0.bundleID == b }?.name))
+        }
+        // Device nodes are added through the palette with labels, so they already exist.
     }
 
     /// Wire one bus between two nodes: replace every existing link between the pair with the given

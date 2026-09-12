@@ -30,8 +30,10 @@ struct GraphEditorView: View {
         }
         .frame(minWidth: 820, minHeight: 560)
         .background(WindowBackground())
-        .onAppear { editor.sync(); canvasFocused = true }
+        .onAppear { app.refreshStage(); editor.sync(); canvasFocused = true }
         .onChange(of: app.graph) { _, _ in editor.sync() }
+        .onChange(of: app.stageConfig) { _, _ in editor.sync() }
+        .onChange(of: app.stageRunning) { _, _ in editor.sync() }
     }
 }
 
@@ -74,11 +76,12 @@ private struct GraphCanvas: View {
         let live = liveEdgeIDs
         let draws: [DrawEdge] = editor.edges.compactMap { e in
             guard let (a, b) = editor.edgeEndpoints(e) else { return nil }
+            let isLive = e.kind == .stage ? app.stageRunning : live.contains(e.id)
             return DrawEdge(id: e.id,
                             from: a.offset(editor.pan), to: b.offset(editor.pan),
                             c0: desc[e.from].map { GraphPalette.color(for: $0.kind) } ?? .gray,
                             c1: desc[e.to].map { GraphPalette.color(for: $0.kind) } ?? .gray,
-                            strands: e.strands, live: live.contains(e.id))
+                            strands: e.strands, live: isLive)
         }
 
         GeometryReader { _ in
@@ -240,19 +243,26 @@ private struct EdgeInteractor: View {
                 }
 
             if hot {
-                Knob(gain: edge.gain)
-                    .position(mid)
-                    // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
-                    .gesture(
-                        DragGesture(minimumDistance: 3)
-                            .onChanged { v in
-                                if editor.knobEdge == nil { editor.beginKnob(edge) }
-                                editor.dragKnob(edge, translation: v.translation)
-                            }
-                            .onEnded { _ in editor.endKnob() }
-                    )
-                    .onTapGesture(count: 2) { editor.resetKnob(edge) }
-                    .help("Drag to set gain · double-click for unity")
+                switch edge.kind {
+                case .audio:
+                    Knob(gain: edge.gain)
+                        .position(mid)
+                        // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
+                        .gesture(
+                            DragGesture(minimumDistance: 3)
+                                .onChanged { v in
+                                    if editor.knobEdge == nil { editor.beginKnob(edge) }
+                                    editor.dragKnob(edge, translation: v.translation)
+                                }
+                                .onEnded { _ in editor.endKnob() }
+                        )
+                        .onTapGesture(count: 2) { editor.resetKnob(edge) }
+                        .help("Drag to set gain · double-click for unity")
+                case .stage:
+                    StageBadge()
+                        .position(mid)
+                        .help("Screen-share source. ⌫ to stop sharing this app.")
+                }
             }
         }
     }
@@ -289,6 +299,20 @@ private struct Knob: View {
         .frame(width: 34, height: 34)
         .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
         .contentShape(Circle())
+    }
+}
+
+/// The midpoint marker on a screen-share edge — informational; the wire has no gain (it's video+audio
+/// captured by the Stage, not a routed gain link). Delete with ⌫ while hovered.
+private struct StageBadge: View {
+    var body: some View {
+        Image(systemName: "rectangle.inset.filled.badge.record")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(GraphPalette.color(for: .program))
+            .padding(6)
+            .background(.regularMaterial, in: Circle())
+            .overlay(Circle().stroke(.primary.opacity(0.15)))
+            .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
     }
 }
 
@@ -477,18 +501,22 @@ private struct Legend: View {
 // MARK: - Glyphs + small helpers
 
 private enum NodeGlyph {
-    static func name(for kind: NodeKind, title: String) -> String {
+    static func name(for kind: GKind, title: String) -> String {
         switch kind {
-        case .hub: return "square.stack.3d.up.fill"
-        case .mic: return "mic.fill"
-        case .input: return "waveform"
-        case .tap: return "app.fill"
-        case .output:
-            let n = title.lowercased()
-            if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
-            if n.contains("airpod") { return "airpodspro" }
-            if n.contains("display") || n.contains("studio") || n.contains("xdr") { return "display" }
-            return "hifispeaker.fill"
+        case .program: return "play.rectangle.fill"
+        case .graph(let k):
+            switch k {
+            case .hub: return "square.stack.3d.up.fill"
+            case .mic: return "mic.fill"
+            case .input: return "waveform"
+            case .tap: return "app.fill"
+            case .output:
+                let n = title.lowercased()
+                if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
+                if n.contains("airpod") { return "airpodspro" }
+                if n.contains("display") || n.contains("studio") || n.contains("xdr") { return "display" }
+                return "hifispeaker.fill"
+            }
         }
     }
 }

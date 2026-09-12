@@ -21,37 +21,55 @@ enum GraphGeom {
 
 // MARK: - Node / edge view models
 
+/// What a canvas node is. Most nodes are graph nodes; `program` is the screen-share bus — a synthetic
+/// sink the Stage renders into. It's driven by stage.json, not the routing graph, so the engine never
+/// touches it (no double-tap): the Stage self-taps the chosen app and renders it into Pancake Program.
+enum GKind: Equatable {
+    case graph(NodeKind)
+    case program
+    var isSource: Bool { if case .graph(let k) = self { return k.isSource } else { return false } }
+    var nodeKind: NodeKind? { if case .graph(let k) = self { return k } else { return nil } }
+}
+
 struct GNode: Identifiable, Equatable {
     let id: NodeID
-    let kind: NodeKind
+    let kind: GKind
     let title: String
     let subtitle: String
     let channels: Int
     let present: Bool
     var isSource: Bool { kind.isSource }
-    var isPermanent: Bool { id == Graph.hubID || id == Graph.micID }
+    /// Fixed buses — hub, Pancake Mic, the screen-share program — are never deletable.
+    var isPermanent: Bool { id == Graph.hubID || id == Graph.micID || id == GraphEditorModel.programID }
 }
 
-/// One connection between two nodes — the editor's unit of routing. `strands` is 1 (mono) or 2
-/// (stereo), purely for drawing; `gain` is the common gain of the underlying channel links.
+/// A connection between two nodes — the editor's unit of routing. `audio` edges are graph links;
+/// `stage` edges are the screen-share source→program relationship (backed by stage.json).
+enum EdgeKind: Equatable { case audio, stage }
+
 struct BusEdge: Identifiable, Equatable {
     let from: NodeID
     let to: NodeID
     let strands: Int
     let gain: Float
+    let kind: EdgeKind
     var id: String { "\(from.rawValue)\u{2192}\(to.rawValue)" }
 }
 
 // MARK: - Colour per node kind
 
 enum GraphPalette {
-    static func color(for kind: NodeKind) -> Color {
+    static func color(for kind: GKind) -> Color {
         switch kind {
-        case .hub: return Color(red: 0.98, green: 0.60, blue: 0.25)   // pancake amber
-        case .mic: return Color(red: 0.78, green: 0.42, blue: 0.95)   // voice purple
-        case .input: return Color(red: 0.30, green: 0.62, blue: 0.98) // input blue
-        case .output: return Color(red: 0.20, green: 0.78, blue: 0.66) // output teal
-        case .tap: return Color(red: 0.38, green: 0.80, blue: 0.42)   // app green
+        case .program: return Color(red: 0.46, green: 0.50, blue: 0.96)   // stream indigo
+        case .graph(let k):
+            switch k {
+            case .hub: return Color(red: 0.98, green: 0.60, blue: 0.25)   // pancake amber
+            case .mic: return Color(red: 0.78, green: 0.42, blue: 0.95)   // voice purple
+            case .input: return Color(red: 0.30, green: 0.62, blue: 0.98) // input blue
+            case .output: return Color(red: 0.20, green: 0.78, blue: 0.66) // output teal
+            case .tap: return Color(red: 0.38, green: 0.80, blue: 0.42)   // app green
+            }
         }
     }
 }
@@ -108,6 +126,9 @@ private struct GraphLayoutStore {
 final class GraphEditorModel: ObservableObject {
     let app: AppModel
 
+    /// The synthetic screen-share program sink. Not a real graph node — see `GKind.program`.
+    static let programID = NodeID("__pancake_program__")
+
     @Published private(set) var gnodes: [GNode] = []
     @Published private(set) var edges: [BusEdge] = []
     @Published var positions: [NodeID: CGPoint] = [:]
@@ -133,12 +154,12 @@ final class GraphEditorModel: ObservableObject {
 
     var descByID: [NodeID: GNode] { Dictionary(uniqueKeysWithValues: gnodes.map { ($0.id, $0) }) }
 
-    // MARK: Building nodes + edges from the graph
+    // MARK: Building nodes + edges from the graph (+ the screen-share overlay)
 
     func sync() {
         var list: [GNode] = []
         var seen = Set<NodeID>()
-        func add(id: NodeID, kind: NodeKind, label: String?) {
+        func add(id: NodeID, kind: GKind, label: String?) {
             guard !seen.contains(id) else { return }
             seen.insert(id)
             list.append(GNode(id: id, kind: kind,
@@ -147,12 +168,17 @@ final class GraphEditorModel: ObservableObject {
                               channels: channelCount(id: id, kind: kind),
                               present: isPresent(kind: kind)))
         }
-        add(id: Graph.hubID, kind: .hub, label: "Pancake")
-        add(id: Graph.micID, kind: .mic, label: "Pancake Mic")
-        for n in app.graph.nodes { add(id: n.id, kind: n.kind, label: n.label) }
+        add(id: Graph.hubID, kind: .graph(.hub), label: "Pancake")
+        add(id: Graph.micID, kind: .graph(.mic), label: "Pancake Mic")
+        add(id: Self.programID, kind: .program, label: "Pancake Program")
+        for n in app.graph.nodes { add(id: n.id, kind: .graph(n.kind), label: n.label) }
+        // The screen-share source may be an app that isn't otherwise in the graph — show it anyway.
+        if let b = app.stageConfig.bundleID {
+            add(id: Node.tap(b).id, kind: .graph(.tap(bundleID: b)), label: app.stageAppName ?? b)
+        }
         gnodes = list
 
-        // Group channel-links into one bus edge per (from, to) node pair.
+        // Audio edges: group channel links into one bus edge per (from, to) node pair.
         var order: [String] = []
         var acc: [String: (from: NodeID, to: NodeID, count: Int, gain: Float)] = [:]
         for l in app.graph.links {
@@ -160,23 +186,32 @@ final class GraphEditorModel: ObservableObject {
             if var e = acc[key] { e.count += 1; acc[key] = e }
             else { acc[key] = (l.from.node, l.to.node, 1, l.gain); order.append(key) }
         }
-        edges = order.map { k in
+        var built = order.map { k -> BusEdge in
             let e = acc[k]!
-            return BusEdge(from: e.from, to: e.to, strands: min(e.count, 2), gain: e.gain)
+            return BusEdge(from: e.from, to: e.to, strands: min(e.count, 2), gain: e.gain, kind: .audio)
         }
+        // The screen-share edge: chosen app tap → program. Backed by stage.json, not the graph.
+        if let b = app.stageConfig.bundleID {
+            built.append(BusEdge(from: Node.tap(b).id, to: Self.programID, strands: 2, gain: 1, kind: .stage))
+        }
+        edges = built
 
         ensurePositions()
     }
 
-    private func channelCount(id: NodeID, kind: NodeKind) -> Int {
+    private func channelCount(id: NodeID, kind: GKind) -> Int {
         switch kind {
-        case .hub, .mic, .tap: return 2
-        case .output(let uid):
-            if let d = app.device(forUID: uid) { return min(16, max(2, d.outputChannels)) }
-            return inferredChannels(id: id)
-        case .input(let uid):
-            if let d = app.device(forUID: uid) { return min(16, max(1, d.inputChannels)) }
-            return inferredChannels(id: id)
+        case .program: return 2
+        case .graph(let k):
+            switch k {
+            case .hub, .mic, .tap: return 2
+            case .output(let uid):
+                if let d = app.device(forUID: uid) { return min(16, max(2, d.outputChannels)) }
+                return inferredChannels(id: id)
+            case .input(let uid):
+                if let d = app.device(forUID: uid) { return min(16, max(1, d.inputChannels)) }
+                return inferredChannels(id: id)
+            }
         }
     }
 
@@ -189,31 +224,43 @@ final class GraphEditorModel: ObservableObject {
         return max(2, maxCh)
     }
 
-    private func isPresent(kind: NodeKind) -> Bool {
+    private func isPresent(kind: GKind) -> Bool {
         switch kind {
-        case .hub, .mic: return true
-        case .output(let uid), .input(let uid): return app.device(forUID: uid) != nil
-        case .tap(let b): return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == b }
+        case .program: return true
+        case .graph(let k):
+            switch k {
+            case .hub, .mic: return true
+            case .output(let uid), .input(let uid): return app.device(forUID: uid) != nil
+            case .tap(let b): return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == b }
+            }
         }
     }
 
-    private func displayTitle(kind: NodeKind, label: String?) -> String {
+    private func displayTitle(kind: GKind, label: String?) -> String {
         switch kind {
-        case .hub: return "Pancake"
-        case .mic: return "Pancake Mic"
-        case .input(let uid), .output(let uid): return label ?? uid
-        case .tap(let b): return label ?? b
+        case .program: return "Pancake Program"
+        case .graph(let k):
+            switch k {
+            case .hub: return "Pancake"
+            case .mic: return "Pancake Mic"
+            case .input(let uid), .output(let uid): return label ?? uid
+            case .tap(let b): return label ?? b
+            }
         }
     }
 
     /// Technical, not cute: say what each node actually is.
-    private func subtitle(kind: NodeKind) -> String {
+    private func subtitle(kind: GKind) -> String {
         switch kind {
-        case .hub: return "virtual output device"
-        case .mic: return "virtual input device"
-        case .input: return "hardware input"
-        case .output: return "hardware output"
-        case .tap: return "process tap"
+        case .program: return "screen-share program bus"
+        case .graph(let k):
+            switch k {
+            case .hub: return "virtual output device"
+            case .mic: return "virtual input device"
+            case .input: return "hardware input"
+            case .output: return "hardware output"
+            case .tap: return "process tap"
+            }
         }
     }
 
@@ -260,7 +307,10 @@ final class GraphEditorModel: ObservableObject {
     private func nodeOrder(_ a: GNode, _ b: GNode) -> Bool {
         func rank(_ n: GNode) -> Int {
             if n.isPermanent { return 0 }
-            switch n.kind { case .input, .output: return 1; case .tap: return 2; default: return 3 }
+            if case .graph(let k) = n.kind {
+                switch k { case .input, .output: return 1; case .tap: return 2; default: return 3 }
+            }
+            return 3
         }
         if rank(a) != rank(b) { return rank(a) < rank(b) }
         return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
@@ -299,6 +349,12 @@ final class GraphEditorModel: ObservableObject {
         let src = p.fromIsSource ? p.from : target
         let dst = p.fromIsSource ? target : p.from
         guard src != dst else { return }
+        if dst == Self.programID {
+            // Screen-share: only an app tap can be streamed. Sets stage.json; the Stage obeys.
+            if case .graph(.tap(let b))? = descByID[src]?.kind { app.setStageApp(b) }
+            return
+        }
+        if src == Self.programID { return }   // the program bus is a sink only
         app.wireBus(from: src, to: dst, pairs: busPairs(from: src, to: dst))
     }
 
@@ -336,7 +392,10 @@ final class GraphEditorModel: ObservableObject {
 
     func deleteHovered() {
         if let id = hoveredEdge, let e = edges.first(where: { $0.id == id }) {
-            app.disconnectBus(from: e.from, to: e.to)
+            switch e.kind {
+            case .stage: app.setStageApp(nil)                       // stop streaming this app
+            case .audio: app.disconnectBus(from: e.from, to: e.to)
+            }
             hoveredEdge = nil
             return
         }
@@ -344,7 +403,9 @@ final class GraphEditorModel: ObservableObject {
     }
 
     func removeNode(_ id: NodeID) {
-        guard id != Graph.hubID, id != Graph.micID else { return }
+        guard let d = descByID[id], !d.isPermanent else { return }
+        // If this node is the current screen-share source, clearing stage removes the stage edge too.
+        if case .graph(.tap(let b))? = descByID[id]?.kind, app.stageConfig.bundleID == b { app.setStageApp(nil) }
         positions[id] = nil
         hoveredNode = nil
         app.removeNode(id)

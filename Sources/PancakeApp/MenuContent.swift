@@ -235,8 +235,8 @@ private struct DeviceLabel: View {
 
 // MARK: - Screen share (Pancake Stage)
 
-/// Controls for the Pancake Stage, driven through the stage.json IPC. The Stage process watches the
-/// same file, so picking here and picking in the Stage's own window stay in sync.
+/// Start/stop the Pancake Stage. The *source* (which app is streamed) is chosen in the graph now —
+/// wire an app tap to the Pancake Program node — so this is just process control + status.
 private struct StageSection: View {
     @ObservedObject var model: AppModel
 
@@ -256,24 +256,9 @@ private struct StageSection: View {
             .padding(.top, 2)
 
             if model.stageRunning {
-                Menu {
-                    Button { model.setStageApp(nil) } label: {
-                        if model.stageConfig.bundleID == nil { Label("None (no audio)", systemImage: "checkmark") }
-                        else { Text("None (no audio)") }
-                    }
-                    if !model.stageApps.isEmpty { Divider() }
-                    ForEach(model.stageApps, id: \.bundleID) { app in
-                        Button { model.setStageApp(app.bundleID) } label: {
-                            if model.stageConfig.bundleID == app.bundleID { Label(app.name, systemImage: "checkmark") }
-                            else { Text(app.name + (app.isRunningOutput ? "  ●" : "")) }
-                        }
-                    }
-                } label: {
-                    ActionLabel("Audio: \(model.stageAppName ?? "None")", "music.note")
-                }
-                .menuStyle(.borderlessButton)
-                .padding(.horizontal, 6)
-
+                Text("Sharing \(model.stageAppName ?? "no app") · pick the source in the graph")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
                 MenuRow(action: { model.stopStage() }) { ActionLabel("Stop screen share", "stop.circle") }
             } else {
                 MenuRow(action: { model.startStage() }) { ActionLabel("Start screen share", "play.rectangle") }
