@@ -6,7 +6,11 @@ Throwaway CoreAudio probes from reverse-engineering the Loopback gain bug
 ```sh
 swift listvol.swift                 # every output device: name, UID, per-element volume
 swift setvol.swift <deviceUID> 1.0  # set a device's hardware volume (0.0–1.0)
+swift lsaggregate.swift             # aggregate devices and their sub-devices
 ```
+
+`lsaggregate` exists to answer "will removing this virtual device break an
+aggregate something else depends on?" — see `../MIGRATION.md` § 4.
 
 `listvol` reports per-element volumes because devices disagree about where the
 control lives — the AirPods expose elements 1 and 2 with no element-0 main

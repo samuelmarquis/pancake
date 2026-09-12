@@ -203,6 +203,12 @@ M1â€“M4 is a tool worth using daily, and supersedes the `audio-defaults` agent â
 pinning the system output becomes unnecessary once it points at a device that
 never disappears.
 
+**Before starting M1, read `MIGRATION.md`.** That agent hard-pins system output to
+`"Loopback Audio"` every few seconds and will fight pancake throughout bring-up,
+which presents as "pancake doesn't work." `touch ~/.config/audio-pin-off`
+suspends it. `MIGRATION.md` also covers what else has to come out, and the order
+to do it in.
+
 ## Risks
 
 - **Driver signing.** `coreaudiod` is picky about HAL plug-ins. Budget a day of

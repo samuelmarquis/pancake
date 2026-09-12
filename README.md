@@ -34,4 +34,5 @@ If you need those, buy Loopback — it's good, and this isn't trying to replace 
 ## Read next
 
 - `DESIGN.md` — architecture, the graph model, and the one hard problem (clock drift)
+- `MIGRATION.md` — what has to be ripped out when Loopback goes, and in what order
 - `NOTES.md` — what was measured about Loopback, and how
