@@ -17,6 +17,14 @@ struct PancakeApp: App {
             Image(nsImage: model.statusImage)
         }
         .menuBarExtraStyle(.window)
+
+        // The visual routing editor. Opened from the menu's "Show graph…"; one instance.
+        Window("Pancake Routing", id: "graph") {
+            GraphEditorView(app: model)
+        }
+        .defaultSize(width: 1000, height: 660)
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
     }
 }
 

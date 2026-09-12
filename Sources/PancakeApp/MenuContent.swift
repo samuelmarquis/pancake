@@ -9,6 +9,7 @@ import SwiftUI
 /// NSMenu.
 struct MenuContent: View {
     @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -75,7 +76,7 @@ struct MenuContent: View {
             Divider().padding(.vertical, 2)
 
             MenuRow(action: { model.rebuildRouting() }) { ActionLabel("Rebuild audio routing", "arrow.triangle.2.circlepath") }
-            MenuRow(action: { model.openGraphFile() }) { ActionLabel("Edit graph file…", "doc.text") }
+            MenuRow(action: { showGraph() }) { ActionLabel("Show graph…", "point.3.connected.trianglepath.dotted") }
             MenuRow(action: { model.openLog() }) { ActionLabel("Show log", "list.bullet.rectangle") }
             MenuRow(action: { model.toggleLaunchAtLogin() }) {
                 HStack(spacing: 10) {
@@ -93,6 +94,13 @@ struct MenuContent: View {
         .padding(8)
         .frame(width: 300)
         .onAppear { model.refreshLaunchAtLogin() }
+    }
+
+    /// Open the routing window. We're an `.accessory` app (no Dock icon), so nudge ourselves to the
+    /// front or the window would open unfocused behind whatever's active.
+    private func showGraph() {
+        openWindow(id: "graph")
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     static func outputGlyph(_ item: MenuOutput) -> String {

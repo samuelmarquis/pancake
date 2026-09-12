@@ -5,6 +5,7 @@ import Foundation
 import PancakeCore
 import ServiceManagement
 
+
 /// One row in the output list: a present device, or the device the graph wants that isn't here.
 struct MenuOutput: Identifiable, Hashable {
     let uid: String
@@ -53,7 +54,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var launchAtLogin = false
 
     private let store = GraphStore()
-    private var graph: Graph
+    /// The desired routing graph. Published so the visual editor re-renders when it changes —
+    /// whether the change came from the menu, the editor itself, the CLI, or a hand-edit of the file.
+    @Published private(set) var graph: Graph
     private let engine: Engine
     private let queue = DispatchQueue(label: "com.pancake.app")
     private var monitor: HardwareMonitor?
@@ -362,11 +365,89 @@ final class AppModel: ObservableObject {
         engine.rebuildNow()
     }
 
-    func openGraphFile() {
-        if !FileManager.default.fileExists(atPath: store.url.path) {
-            try? store.save(graph)
-        }
-        NSWorkspace.shared.open(store.url)
+    // MARK: Visual graph editor
+
+    /// A present device by UID, output or input — used by the editor for channel counts and presence.
+    func device(forUID uid: String) -> AudioDevice? {
+        outputs.first { $0.uid == uid } ?? inputs.first { $0.uid == uid }
+    }
+
+    /// The graph the engine is actually running right now (absent devices/dead taps dropped). The
+    /// editor compares against it to show which links are live.
+    var effectiveGraph: Graph? {
+        if case .running(let info) = state { return info.effectiveGraph }
+        return nil
+    }
+
+    /// Apply an edited graph everywhere at once: publish it, re-derive the menu's mirrored state,
+    /// hand it to the engine (which debounces and hot-swaps gain-only changes), and persist it. The
+    /// save is debounced so a gain-slider drag — dozens of edits a second — doesn't hammer the disk;
+    /// the engine still gets every edit live, and `graph` is already current for the watcher's guard.
+    private func applyEditedGraph(_ g: Graph) {
+        graph = g
+        syncFromGraph()
+        engine.apply(g)
+        scheduleGraphSave()
+    }
+
+    private var graphSaveWork: DispatchWorkItem?
+    private func scheduleGraphSave() {
+        graphSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.save() }
+        graphSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// The two fixed buses may not be named in the graph yet; make sure an endpoint exists before wiring it.
+    private func ensureNode(_ g: inout Graph, _ id: NodeID) {
+        guard g.node(id) == nil else { return }
+        if id == Graph.hubID { g.upsert(.hub) }
+        else if id == Graph.micID { g.upsert(.mic) }
+        // Device and tap nodes are added through the palette before they can be wired, so they exist.
+    }
+
+    func connect(from: Port, to: Port) {
+        var g = graph
+        ensureNode(&g, from.node)
+        ensureNode(&g, to.node)
+        g.connect(from, to)
+        applyEditedGraph(g)
+        Log.info("editor: connect \(from) → \(to)")
+    }
+
+    /// Remove one link. Deliberately does *not* prune the now-possibly-orphan node — disconnecting a
+    /// wire leaves the node on the canvas (pipewire-style); deleting a node is a separate action.
+    func disconnect(from: Port, to: Port) {
+        var g = graph
+        g.links.removeAll { $0.from == from && $0.to == to }
+        applyEditedGraph(g)
+        Log.info("editor: disconnect \(from) → \(to)")
+    }
+
+    func setGain(from: Port, to: Port, gain: Float) {
+        var g = graph
+        guard let i = g.links.firstIndex(where: { $0.from == from && $0.to == to }) else { return }
+        g.links[i].gain = gain
+        applyEditedGraph(g)
+    }
+
+    func addOutputNode(_ d: AudioDevice) { addNode(.output(d.uid, label: d.name)) }
+    func addInputNode(_ d: AudioDevice) { addNode(.input(d.uid, label: d.name)) }
+    func addTapNode(_ a: TappableApp) { addNode(.tap(a.bundleID, label: a.name)) }
+
+    private func addNode(_ node: Node) {
+        var g = graph
+        g.upsert(node)
+        applyEditedGraph(g)
+        Log.info("editor: add node \(node.id)")
+    }
+
+    func removeNode(_ id: NodeID) {
+        guard id != Graph.hubID else { return }
+        var g = graph
+        g.remove(id)
+        applyEditedGraph(g)
+        Log.info("editor: remove node \(id)")
     }
 
     func openLog() {
