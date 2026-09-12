@@ -28,6 +28,7 @@ struct GraphEditorView: View {
 
             TopBar(app: app, editor: editor)
         }
+        .ignoresSafeArea(.container, edges: .top)   // let the top bar reach up flush with the traffic lights
         .frame(minWidth: 820, minHeight: 560)
         .background(WindowBackground())
         .onAppear { app.refreshStage(); editor.sync(); canvasFocused = true }
@@ -246,8 +247,11 @@ private struct EdgeInteractor: View {
         ZStack {
             // Hit region: fat stroke of the curve ∪ a disc at the midpoint, so moving onto the knob
             // keeps the wire "hovered" and the knob doesn't flicker away.
-            Color.clear
-                .contentShape(EdgeHitShape(from: from, to: to, width: 20, knob: mid, knobRadius: 24))
+            // The hit area must be the wire's own shape (fat stroke ∪ midpoint disc), NOT a canvas-
+            // filling Color.clear — a full-canvas clear on the topmost edge swallows hover everywhere,
+            // starving nodes and other wires of it. A ~transparent fill still tracks hover fine.
+            EdgeHitShape(from: from, to: to, width: 20, knob: mid, knobRadius: 24)
+                .fill(Color.white.opacity(0.001))
                 .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
 
             if hot {
