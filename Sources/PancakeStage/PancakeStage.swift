@@ -10,8 +10,12 @@ import PancakeCore
 // (no echo); and the audio it *does* carry is whatever app you pick, rendered as this process's
 // output into the silent "Pancake Program" bus.
 //
+// The Stage is a dumb executor of ~/.config/pancake/stage.json (StageConfig): which app's audio to
+// render, and whether the mirror window is hidden. The menu bar writes that file; so does the
+// Stage's own controls window. Both are thin views over the one source of truth.
+//
 // Two windows on purpose:
-//   • "Pancake Stage"  — the pristine mirror. This is the one you share. No pancake chrome.
+//   • "Pancake Stage"  — the pristine mirror. This is the one you share. No chrome.
 //   • "Pancake Stage — Controls" — the app picker + status. Never shared, and excluded from the
 //     capture so it doesn't appear inside the mirror either.
 
@@ -103,40 +107,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-/// A running app the Stage can tap, with a human-friendly name.
-struct TappableApp: Hashable {
-    let bundleID: String
-    let name: String
-    let isRunningOutput: Bool
-}
-
-/// Tappable apps: HAL process objects that carry a bundle id, deduped, resolved to friendly names,
-/// limited to regular (dock) apps or anything currently producing output. Currently-playing apps
-/// sort first, then alphabetical.
-func tappableApps() -> [TappableApp] {
-    var byBundle: [String: AudioProcess] = [:]
-    for p in ProcessTap.processes() where !p.bundleID.isEmpty {
-        if let e = byBundle[p.bundleID] {
-            if p.isRunningOutput && !e.isRunningOutput { byBundle[p.bundleID] = p }
-        } else {
-            byBundle[p.bundleID] = p
-        }
-    }
-    let running = NSWorkspace.shared.runningApplications
-    var out: [TappableApp] = []
-    for (bid, proc) in byBundle {
-        let apps = running.filter { $0.bundleIdentifier == bid }
-        let regular = apps.first { $0.activationPolicy == .regular }
-        // Skip background daemons/helpers that aren't actually playing anything.
-        guard regular != nil || proc.isRunningOutput else { continue }
-        let name = regular?.localizedName ?? apps.first?.localizedName ?? bid
-        out.append(TappableApp(bundleID: bid, name: name, isRunningOutput: proc.isRunningOutput))
-    }
-    return out.sorted {
-        if $0.isRunningOutput != $1.isRunningOutput { return $0.isRunningOutput }   // playing first
-        return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-    }
-}
+// TappableApp + tappableApps() now live in PancakeCore (shared with the menu bar).
 
 final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var mirrorWindow: NSWindow!
@@ -149,13 +120,18 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shareLabel: NSTextField!
     private let audio = StageAudio()
 
-    /// The app currently being shared, if any.
+    // The file IS the IPC. The menu bar and this window both write it; we watch it and obey.
+    private let store = StageStore()
+    private var config = StageConfig()
+    private var watcher: FileWatcher?
+    private let ioQueue = DispatchQueue(label: "com.pancake.stage.config")
+
+    /// The bundle id the audio tap is *actually* running on (vs. `config.bundleID`, the desired one).
     private var currentBundleID: String?
     /// Preferred app to select automatically when it becomes available.
     private let preferredBundleID = "com.ableton.live"
     /// Auto-select stays armed until the user makes any manual pick (including "None"), at which
-    /// point we stop second-guessing them. This is what makes "launch the Stage, then open Ableton"
-    /// just work without us overriding a deliberate choice later.
+    /// point we stop second-guessing them. Makes "launch the Stage, then open Ableton" just work.
     private var autoSelectArmed = true
 
     /// Fires when the HAL's process set changes — i.e. an app becomes (un)tappable. Drives auto-tap.
@@ -165,6 +141,8 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// sliver so it stays composited and Discord-shareable but is invisible on your desktop.
     private var mirrorHidden = false
     private var lastVisibleFrame: NSRect?
+    /// The captured display's aspect, so we can restore the right size after un-hiding.
+    private var displayAspect: CGSize?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -180,16 +158,23 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         capture.onDisplaySize = { [weak self] size in self?.matchMirrorAspect(size) }
         capture.start()
 
+        // Load the saved config and start watching for edits (from the menu, us, or a text editor).
+        config = (try? store.load()) ?? StageConfig()
+        installConfigWatcher()
+        // The hidden/window half needs no permission; apply it right away.
+        setMirrorHidden(config.hidden)
+        hideCheckbox.state = config.hidden ? .on : .off
+
         // Tapping an app is "audio capture" to TCC → Microphone permission (same gate the engine's
-        // taps use). Ask, then enable the picker.
+        // taps use). Ask, then enable the audio half.
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            enableAudioPicker()
+            enableAudio()
         case .notDetermined:
             audioLabel.stringValue = "audio: requesting microphone access…"
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
-                    if granted { self?.enableAudioPicker() }
+                    if granted { self?.enableAudio() }
                     else { self?.audioLabel.stringValue = "audio: microphone access denied — enable it in Settings › Privacy › Microphone" }
                 }
             }
@@ -200,6 +185,55 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Report — for real, via ScreenCaptureKit, the same API Discord uses — whether the mirror
         // window is shareable. Gives us ground truth on the hidden-window question once frames flow.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.logShareability("launch") }
+    }
+
+    // MARK: Config (the IPC)
+
+    private func installConfigWatcher() {
+        watcher = store.watch(queue: ioQueue) { [weak self] in
+            guard let self, let loaded = try? self.store.load() else { return }
+            DispatchQueue.main.async {
+                guard loaded != self.config else { return }   // ignore our own save coming back around
+                NSLog("stage: config changed on disk; applying")
+                self.applyConfig(loaded, persist: false)
+            }
+        }
+    }
+
+    /// Apply a new config: reconcile the window visibility and the audio tap, refresh the UI, and
+    /// (when the change originated locally) write it back to disk.
+    private func applyConfig(_ new: StageConfig, persist: Bool) {
+        config = new
+        if persist {
+            do { try store.save(new) } catch { NSLog("stage: save config: \(error)") }
+        }
+        setMirrorHidden(new.hidden)
+        hideCheckbox?.state = new.hidden ? .on : .off
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { applyAudio() }
+        selectCurrentInPopup()
+    }
+
+    /// Start/stop the tap so the running audio matches `config.bundleID`.
+    private func applyAudio() {
+        guard config.bundleID != currentBundleID else { return }
+        if let bid = config.bundleID, !bid.isEmpty {
+            currentBundleID = bid
+            let msg = audio.start(bundleID: bid)
+            audioLabel.stringValue = "audio: \(msg)"
+            NSLog("stage: audio: \(msg)")
+        } else {
+            audio.stop()
+            currentBundleID = nil
+            audioLabel.stringValue = "audio: none shared"
+            NSLog("stage: audio stopped (none selected)")
+        }
+    }
+
+    /// Mutate the config from a local control and apply + persist it.
+    private func update(_ mutate: (inout StageConfig) -> Void) {
+        var c = config
+        mutate(&c)
+        applyConfig(c, persist: true)
     }
 
     // MARK: Windows
@@ -231,8 +265,13 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Size the mirror to the display's exact aspect ratio so there are no letterbox bars.
     private func matchMirrorAspect(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
+        displayAspect = size
         mirrorWindow.contentAspectRatio = size
         guard !mirrorHidden else { return }
+        resizeMirrorToAspect(size)
+    }
+
+    private func resizeMirrorToAspect(_ size: CGSize) {
         let w: CGFloat = 1000
         mirrorWindow.setContentSize(NSSize(width: w, height: (w * size.height / size.width).rounded()))
         mirrorWindow.center()
@@ -266,7 +305,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appPopup.menu?.delegate = self          // rebuild the list each time it opens
         container.addSubview(appPopup)
 
-        let hint = NSTextField(labelWithString: "Window-share the “Pancake Stage” window in Discord.")
+        let hint = NSTextField(labelWithString: "Also controllable from the pancake menu bar. Window-share “Pancake Stage” in Discord.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         hint.frame = NSRect(x: 16, y: height - 86, width: width - 32, height: 16)
@@ -298,7 +337,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Hidden mirror
 
     @objc private func toggleHidden(_ sender: NSButton) {
-        setMirrorHidden(sender.state == .on)
+        update { $0.hidden = (sender.state == .on) }
     }
 
     /// Park the mirror window at a 1pt on-screen sliver (bottom-left corner, effectively invisible)
@@ -320,7 +359,8 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mirrorWindow.orderFront(nil)   // stay composited while parked
             NSLog("stage: mirror hidden (parked off-desktop, still shareable)")
         } else {
-            if let prev = lastVisibleFrame { mirrorWindow.setFrame(prev, display: true) }
+            if let a = displayAspect { resizeMirrorToAspect(a) }
+            else if let prev = lastVisibleFrame { mirrorWindow.setFrame(prev, display: true) }
             else { mirrorWindow.center() }
             mirrorWindow.makeKeyAndOrderFront(nil)
             NSLog("stage: mirror shown")
@@ -358,15 +398,15 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Auto-tap when the target app appears
 
-    /// Listen for changes to the HAL process set. When the preferred app becomes tappable and we're
-    /// still idle (user hasn't picked anything yet), select it automatically.
-    private func enableAudioPicker() {
+    private func enableAudio() {
         installProcessListener()
         rebuildPopup()
-        // Auto-select the preferred app (Ableton) if it's tappable right now; otherwise wait — either
-        // for the user to choose, or for the process listener to catch it launching.
+        applyAudio()   // honour a bundleID already in the saved config
+        guard config.bundleID == nil else { return }
+        // Nothing chosen yet: auto-select the preferred app if it's tappable right now; otherwise
+        // wait — either for the user to choose, or for the process listener to catch it launching.
         if autoSelectArmed && tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
-            selectAndShare(preferredBundleID)
+            update { $0.bundleID = preferredBundleID }
         } else {
             audioLabel.stringValue = "audio: pick an app to share ↑"
         }
@@ -382,10 +422,10 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func processListChanged() {
         rebuildPopup()   // keep the list + ● indicators honest as apps come and go
-        guard autoSelectArmed, currentBundleID == nil else { return }
+        guard autoSelectArmed, config.bundleID == nil else { return }
         if tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
             NSLog("stage: preferred app became tappable — auto-selecting")
-            selectAndShare(preferredBundleID)
+            update { $0.bundleID = preferredBundleID }
         }
     }
 
@@ -411,11 +451,11 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func selectCurrentInPopup() {
-        let target = currentBundleID ?? ""
+        let target = config.bundleID ?? ""
         if let item = appPopup.menu?.items.first(where: { ($0.representedObject as? String) == target }) {
             appPopup.select(item)
-        } else if let cur = currentBundleID {
-            // Selected app is no longer in the list (quit) — show it anyway so state is honest.
+        } else if let cur = config.bundleID {
+            // Chosen app is no longer in the list (quit) — show it anyway so state is honest.
             let item = NSMenuItem(title: cur + "  (not running)", action: nil, keyEquivalent: "")
             item.representedObject = cur
             appPopup.menu?.addItem(item)
@@ -429,22 +469,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Any manual selection disarms auto-tap — we stop overriding the user's choice from here on.
         autoSelectArmed = false
         let bid = (sender.selectedItem?.representedObject as? String) ?? ""
-        if bid.isEmpty {
-            audio.stop()
-            currentBundleID = nil
-            audioLabel.stringValue = "audio: none shared"
-            NSLog("stage: audio stopped (none selected)")
-        } else {
-            selectAndShare(bid)
-        }
-    }
-
-    private func selectAndShare(_ bundleID: String) {
-        currentBundleID = bundleID
-        let msg = audio.start(bundleID: bundleID)
-        audioLabel.stringValue = "audio: \(msg)"
-        NSLog("stage: audio: \(msg)")
-        selectCurrentInPopup()
+        update { $0.bundleID = bid.isEmpty ? nil : bid }
     }
 
     // NSMenuDelegate: refresh the app list right before the popup opens.
@@ -454,6 +479,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ n: Notification) {
         processListener?.remove()
+        watcher?.stop()
         audio.stop()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }

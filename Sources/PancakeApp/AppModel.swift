@@ -41,12 +41,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var hubMuted: Bool = false
     @Published private(set) var state: Engine.State = .stopped
 
+    // Pancake Stage (clean Discord screen-share) — driven via the stage.json IPC. The Stage process
+    // watches the same file and obeys; this is just a second thin view over it.
+    @Published private(set) var stageConfig = StageConfig()
+    @Published private(set) var stageRunning = false
+    @Published private(set) var stageApps: [TappableApp] = []
+    static let stageBundleID = "com.pancake.stage"
+
     private let store = GraphStore()
     private var graph: Graph
     private let engine: Engine
     private let queue = DispatchQueue(label: "com.pancake.app")
     private var monitor: HardwareMonitor?
     private var watcher: FileWatcher?
+    private let stageStore = StageStore()
+    private var stageWatcher: FileWatcher?
+    private var workspaceObservers: [NSObjectProtocol] = []
     /// Listeners on Pancake's volume/mute so the slider tracks the hardware keys live.
     private var hubVolumeListeners: [PropertyListener] = []
 
@@ -75,6 +85,14 @@ final class AppModel: ObservableObject {
             guard let g = try? store.load() else { return }
             Task { @MainActor in self?.graphFileChanged(g) }
         }
+
+        stageConfig = (try? stageStore.load()) ?? StageConfig()
+        let stageStore = self.stageStore
+        stageWatcher = stageStore.watch(queue: queue) { [weak self] in
+            guard let cfg = try? stageStore.load() else { return }
+            Task { @MainActor in self?.stageConfigFileChanged(cfg) }
+        }
+        observeStageLifecycle()
 
         engine.start()
         ensureMicrophoneAccess()
@@ -212,6 +230,75 @@ final class AppModel: ObservableObject {
         engine.apply(graph)
         save()
         Log.info("menu: input cleared")
+    }
+
+    // MARK: Stage (screen share)
+
+    /// The app the Stage is set to render, as a friendly name (for the menu label).
+    var stageAppName: String? {
+        guard let bid = stageConfig.bundleID else { return nil }
+        return stageApps.first { $0.bundleID == bid }?.name ?? bid
+    }
+
+    func setStageApp(_ bundleID: String?) {
+        stageConfig.bundleID = bundleID
+        saveStage()
+        Log.info("menu: stage app → \(bundleID ?? "none")")
+    }
+
+    func toggleStageHidden() {
+        stageConfig.hidden.toggle()
+        saveStage()
+        Log.info("menu: stage mirror \(stageConfig.hidden ? "hidden" : "shown")")
+    }
+
+    func startStage() {
+        refreshStage()
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.stageBundleID) else {
+            Log.warn("stage app not found by bundle id \(Self.stageBundleID); run it once (make run-stage) so LaunchServices registers it")
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, err in
+            if let err { Log.warn("launch stage: \(err.localizedDescription)") }
+        }
+        Log.info("menu: starting screen share")
+    }
+
+    func stopStage() {
+        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == Self.stageBundleID {
+            app.terminate()
+        }
+        Log.info("menu: stopping screen share")
+    }
+
+    /// Re-read who's running and which apps are tappable (call when the menu opens).
+    func refreshStage() { refreshStageState() }
+
+    private func saveStage() {
+        do { try stageStore.save(stageConfig) } catch { Log.warn("save stage config: \(error)") }
+    }
+
+    private func stageConfigFileChanged(_ cfg: StageConfig) {
+        guard cfg != stageConfig else { return }   // our own save coming back around
+        stageConfig = cfg
+    }
+
+    private func observeStageLifecycle() {
+        refreshStageState()
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            let obs = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshStageState() }
+            }
+            workspaceObservers.append(obs)
+        }
+    }
+
+    private func refreshStageState() {
+        stageRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.stageBundleID }
+        stageApps = tappableApps()
     }
 
     func toggleOutputLock() {

@@ -70,6 +70,9 @@ struct MenuContent: View {
             }
 
             Divider().padding(.vertical, 2)
+            StageSection(model: model)
+
+            Divider().padding(.vertical, 2)
 
             MenuRow(action: { model.rebuildRouting() }) { ActionLabel("Rebuild audio routing", "arrow.triangle.2.circlepath") }
             MenuRow(action: { model.openGraphFile() }) { ActionLabel("Edit graph file…", "doc.text") }
@@ -208,6 +211,60 @@ private struct DeviceLabel: View {
             }
         }
         .opacity(dimmed ? 0.55 : 1)
+    }
+}
+
+// MARK: - Screen share (Pancake Stage)
+
+/// Controls for the Pancake Stage, driven through the stage.json IPC. The Stage process watches the
+/// same file, so picking here and picking in the Stage's own window stay in sync.
+private struct StageSection: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text("SCREEN SHARE")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.stageRunning {
+                    Circle().fill(Color.green).frame(width: 7, height: 7)
+                    Text("on").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 2)
+
+            if model.stageRunning {
+                Menu {
+                    Button { model.setStageApp(nil) } label: {
+                        if model.stageConfig.bundleID == nil { Label("None (no audio)", systemImage: "checkmark") }
+                        else { Text("None (no audio)") }
+                    }
+                    if !model.stageApps.isEmpty { Divider() }
+                    ForEach(model.stageApps, id: \.bundleID) { app in
+                        Button { model.setStageApp(app.bundleID) } label: {
+                            if model.stageConfig.bundleID == app.bundleID { Label(app.name, systemImage: "checkmark") }
+                            else { Text(app.name + (app.isRunningOutput ? "  ●" : "")) }
+                        }
+                    }
+                } label: {
+                    ActionLabel("Audio: \(model.stageAppName ?? "None")", "music.note")
+                }
+                .menuStyle(.borderlessButton)
+                .padding(.horizontal, 6)
+
+                MenuRow(action: { model.toggleStageHidden() }) {
+                    ActionLabel(model.stageConfig.hidden ? "Show mirror window" : "Hide mirror window",
+                                model.stageConfig.hidden ? "eye" : "eye.slash")
+                }
+                MenuRow(action: { model.stopStage() }) { ActionLabel("Stop screen share", "stop.circle") }
+            } else {
+                MenuRow(action: { model.startStage() }) { ActionLabel("Start screen share", "play.rectangle") }
+            }
+        }
+        .onAppear { model.refreshStage() }
     }
 }
 
