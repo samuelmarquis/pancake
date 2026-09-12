@@ -162,15 +162,18 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
    ports to route; the mapping is chosen for you (mono fans to both, stereo sums to mono, else
    straight). Wires draw in one `Canvas` with a **colour gradient** blending the source node's hue into
    the sink's; live edges solid, waiting edges dashed + dim. **Gain is an in-place knob**: hover a wire,
-   a rotary knob appears at its midpoint — drag to set gain, double-click for unity. `⌫` removes the
-   hovered wire (or hovered node; nodes also have a hover ✕). Add nodes from the palette (live
-   devices/tappable apps); drag nodes, pan the canvas, **Tidy** re-columns. Edits apply to the engine at
-   once and persist to `graph.json`; **node positions live in a separate
-   `~/.config/pancake/graph-layout.json`** so the IPC stays clean. **Screen-share is integrated**: the
-   **Pancake Program** node is the stream bus; wiring an app tap → Program sets the Stage's source
-   (backed by `stage.json`, *not* the graph, so the engine never double-taps). Liquid-glass buttons
-   where the CLT SDK has them; top bar sits on the traffic-light row; window spawns at min size.
-   Remaining polish if wanted: zoom, multi-select, marquee, snapping.
+   a **ring-gauge knob** (arc open at the bottom, filled to the current gain, dB in the centre) appears
+   at its midpoint — drag to set gain, double-click for unity. `⌫` removes the hovered wire (or hovered
+   node; nodes also have a hover ✕). **Re-drawing a wire that already exists removes it** (toggle) — that
+   goes for the screen-share edge too. Add nodes from the top-bar palette **or right-click the canvas**
+   (drops the node at the cursor); drag nodes, pan the canvas, **Tidy** snaps every node onto the dot
+   grid (it aligns, it doesn't re-column). Edits apply to the engine at once and persist to `graph.json`;
+   **node positions live in a separate `~/.config/pancake/graph-layout.json`** so the IPC stays clean.
+   **Screen-share is integrated**: the **Pancake Program** node is the stream bus; wiring an app tap →
+   Program sets the Stage's source (backed by `stage.json`, *not* the graph, so the engine never
+   double-taps). Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
+   (its legend drops out when the window is narrow); the window opens fitting a tidied graph and shrinks
+   much smaller. Remaining polish if wanted: zoom, multi-select, marquee.
 
    Deliberately NOT done — **plugin (AU/VST/CLAP) inserts in the graph.** It would break invariant #3:
    the IOProc is pure C gain-routing (`out += in*gain`, no alloc/locks/ObjC/Swift), and hosting a plugin

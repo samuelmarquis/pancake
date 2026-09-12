@@ -29,7 +29,7 @@ struct GraphEditorView: View {
             TopBar(app: app, editor: editor)
         }
         .ignoresSafeArea(.container, edges: .top)   // let the top bar reach up flush with the traffic lights
-        .frame(minWidth: 820, minHeight: 560)
+        .frame(minWidth: 460, minHeight: 340)
         .background(WindowBackground())
         .onAppear { app.refreshStage(); editor.sync(); canvasFocused = true }
         .onChange(of: app.graph) { _, _ in editor.sync() }
@@ -90,6 +90,8 @@ private struct GraphCanvas: View {
                 DotGrid(pan: editor.pan)
                     .contentShape(Rectangle())
                     .gesture(DragGesture().onChanged { editor.panBy($0.translation) }.onEnded { _ in editor.endPan() })
+                    // Right-click empty canvas → add a node right where you clicked.
+                    .contextMenu { addNodeItems(app: app, editor: editor, atCursor: true) }
 
                 WiresCanvas(edges: draws, hovered: editor.hoveredEdge)
 
@@ -278,28 +280,53 @@ private struct EdgeInteractor: View {
     }
 }
 
+/// A ring-gauge gain knob (per the mock): a thick arc open at the bottom, filled to the current
+/// gain, with the dB value large in the centre. Drag it to set gain, double-click for unity.
 private struct Knob: View {
     let gain: Float
+    private var fraction: CGFloat { CGFloat((min(12, max(-48, GainMath.dB(gain))) + 48) / 60) }
+    private let tint = Color(red: 0.95, green: 0.26, blue: 0.21)   // mock red
+
     var body: some View {
-        let unity = abs(gain - 1) < 0.001
         ZStack {
-            Circle().fill(.regularMaterial)
-            Circle().stroke(.primary.opacity(0.18), lineWidth: 1)
-            // Indicator tick, rotated by the current gain.
-            Capsule()
-                .fill(unity ? Color.secondary : Color.accentColor)
-                .frame(width: 2.5, height: 11)
-                .offset(y: -7)
-                .rotationEffect(.degrees(GainMath.angle(gain)))
+            Circle().fill(.regularMaterial)             // legible backing over the wires
+                .frame(width: 38, height: 38)
+                .overlay(Circle().stroke(.primary.opacity(0.10), lineWidth: 1))
+            GaugeArc(fraction: 1)
+                .stroke(tint.opacity(0.16), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            GaugeArc(fraction: fraction)
+                .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
             Text(GainMath.label(gain))
-                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .font(.system(size: 13, weight: .bold, design: .rounded))
                 .monospacedDigit()
-                .offset(y: 10)
-                .foregroundStyle(.secondary)
+                .minimumScaleFactor(0.6)
+                .lineLimit(1)
+                .foregroundStyle(tint)
+                .padding(.horizontal, 8)
         }
-        .frame(width: 34, height: 34)
-        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+        .frame(width: 48, height: 48)
+        .shadow(color: .black.opacity(0.22), radius: 4, y: 1)
         .contentShape(Circle())
+    }
+}
+
+/// A 270°-sweep arc, open at the bottom, starting lower-left. `fraction` is how much of the sweep to
+/// draw (1 = full track). Sampled by hand so the sweep direction is unambiguous.
+private struct GaugeArc: Shape {
+    var fraction: CGFloat
+    var animatableData: CGFloat { get { fraction } set { fraction = newValue } }
+    func path(in rect: CGRect) -> Path {
+        let c = CGPoint(x: rect.midX, y: rect.midY)
+        let r = min(rect.width, rect.height) / 2 - 2.5
+        let sweep = 270.0 * Double(max(0, min(1, fraction)))
+        var p = Path()
+        let steps = 64
+        for i in 0...steps {
+            let a = (135.0 + sweep * Double(i) / Double(steps)) * .pi / 180
+            let pt = CGPoint(x: c.x + CGFloat(cos(a)) * r, y: c.y + CGFloat(sin(a)) * r)
+            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+        }
+        return p
     }
 }
 
@@ -420,28 +447,32 @@ private struct TopBar: View {
     @ObservedObject var editor: GraphEditorModel
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
-                .foregroundStyle(.secondary)
-            Text("Routing").font(.system(size: 13, weight: .semibold))
+        GeometryReader { geo in
+            HStack(spacing: 10) {
+                Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                    .foregroundStyle(.secondary)
+                Text("Routing").font(.system(size: 13, weight: .semibold))
 
-            Divider().frame(height: 16)
+                Divider().frame(height: 16)
 
-            AddMenu(app: app, editor: editor)
-            Button { editor.autoArrange() } label: { Label("Tidy", systemImage: "rectangle.3.offgrid") }
-                .glassButton()
-            Button { editor.resetView() } label: { Label("Recenter", systemImage: "scope") }
-                .glassButton()
+                AddMenu(app: app, editor: editor)
+                Button { editor.snapToGrid() } label: { Label("Tidy", systemImage: "square.grid.3x3") }
+                    .glassButton()
+                    .help("Snap nodes to the grid")
+                Button { editor.resetView() } label: { Label("Recenter", systemImage: "scope") }
+                    .glassButton()
 
-            Spacer()
-            Legend()
+                Spacer()
+                if geo.size.width > 600 { Legend() }   // drops out when the window is narrow
+            }
+            .controlSize(.small)
+            .padding(.leading, 82)   // clear the traffic lights
+            .padding(.trailing, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.regularMaterial)
+            .overlay(Rectangle().frame(height: 1).foregroundStyle(.primary.opacity(0.08)), alignment: .bottom)
         }
-        .controlSize(.small)
-        .padding(.leading, 82)   // clear the traffic lights
-        .padding(.trailing, 14)
-        .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)   // title-bar band height → flush with the lights
-        .background(.regularMaterial)
-        .overlay(Rectangle().frame(height: 1).foregroundStyle(.primary.opacity(0.08)), alignment: .bottom)
+        .frame(height: 30)   // title-bar band height → flush with the traffic lights
     }
 }
 
@@ -451,31 +482,49 @@ private struct AddMenu: View {
 
     var body: some View {
         Menu {
-            let existing = Set(app.graph.nodes.compactMap { $0.kind.deviceUID })
-            let outs = app.outputs.filter { !existing.contains($0.uid) }
-            let ins = app.inputs.filter { !existing.contains($0.uid) }
-            let existingTaps = Set(app.graph.micTapBundleIDs)
-            let apps = tappableApps().filter { !existingTaps.contains($0.bundleID) }
-
-            if outs.isEmpty && ins.isEmpty && apps.isEmpty {
-                Text("Everything here is already on the canvas")
-            }
-            if !outs.isEmpty {
-                Section("Output devices") { ForEach(outs, id: \.uid) { d in Button(d.name) { app.addOutputNode(d) } } }
-            }
-            if !ins.isEmpty {
-                Section("Input devices") { ForEach(ins, id: \.uid) { d in Button(d.name) { app.addInputNode(d) } } }
-            }
-            if !apps.isEmpty {
-                Section("App audio (process taps)") {
-                    ForEach(apps, id: \.bundleID) { a in Button(a.name + (a.isRunningOutput ? "  ●" : "")) { app.addTapNode(a) } }
-                }
-            }
+            addNodeItems(app: app, editor: editor, atCursor: false)
         } label: {
             Label("Add node", systemImage: "plus")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+}
+
+/// The palette of addable nodes (live output/input devices and tappable apps), shared by the top-bar
+/// "Add node" menu and the canvas right-click menu. `atCursor` drops the node where you clicked;
+/// otherwise it lands in the auto-layout column.
+@MainActor @ViewBuilder
+private func addNodeItems(app: AppModel, editor: GraphEditorModel, atCursor: Bool) -> some View {
+    let existing = Set(app.graph.nodes.compactMap { $0.kind.deviceUID })
+    let outs = app.outputs.filter { !existing.contains($0.uid) }
+    let ins = app.inputs.filter { !existing.contains($0.uid) }
+    let existingTaps = Set(app.graph.micTapBundleIDs)
+    let apps = tappableApps().filter { !existingTaps.contains($0.bundleID) }
+
+    if outs.isEmpty && ins.isEmpty && apps.isEmpty {
+        Text("Everything here is already on the canvas")
+    }
+    if !outs.isEmpty {
+        Section("Output devices") {
+            ForEach(outs, id: \.uid) { d in
+                Button(d.name) { atCursor ? editor.addOutputAtCursor(d) : app.addOutputNode(d) }
+            }
+        }
+    }
+    if !ins.isEmpty {
+        Section("Input devices") {
+            ForEach(ins, id: \.uid) { d in
+                Button(d.name) { atCursor ? editor.addInputAtCursor(d) : app.addInputNode(d) }
+            }
+        }
+    }
+    if !apps.isEmpty {
+        Section("App audio (process taps)") {
+            ForEach(apps, id: \.bundleID) { a in
+                Button(a.name + (a.isRunningOutput ? "  ●" : "")) { atCursor ? editor.addTapAtCursor(a) : app.addTapNode(a) }
+            }
+        }
     }
 }
 

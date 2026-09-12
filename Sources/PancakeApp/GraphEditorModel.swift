@@ -13,6 +13,8 @@ enum GraphGeom {
     static let nodeHeight: CGFloat = 60
     static let cornerRadius: CGFloat = 15
     static let portRadius: CGFloat = 7
+    /// The dot-grid pitch. Tidy snaps node corners to this so they line up on the dots.
+    static let gridStep: CGFloat = 26
 
     static func portCenter(origin: CGPoint, isSource: Bool) -> CGPoint {
         CGPoint(x: isSource ? origin.x + nodeWidth : origin.x, y: origin.y + nodeHeight / 2)
@@ -146,6 +148,10 @@ final class GraphEditorModel: ObservableObject {
     private var dragStart: [NodeID: CGPoint] = [:]
     private var panStart: CGSize?
     private var knobGainStart: Float?
+    /// Latest pointer position in screen space — used to place a right-click-added node at the cursor.
+    var lastPoint: CGPoint = .zero
+    /// Canvas-space top-left for the next node added, consumed once by `placeNew` (set by right-click add).
+    private var pendingPlacement: CGPoint?
 
     init(app: AppModel) {
         self.app = app
@@ -286,16 +292,17 @@ final class GraphEditorModel: ObservableObject {
     }
 
     private func placeNew(_ n: GNode) -> CGPoint {
-        let x: CGFloat = n.isSource ? 72 : 452
+        if let p = pendingPlacement { pendingPlacement = nil; return p }   // right-click add: drop at the cursor
+        let x: CGFloat = n.isSource ? 64 : 400
         let bottom = gnodes
             .filter { $0.isSource == n.isSource && $0.id != n.id }
             .compactMap { peer in positions[peer.id].map { $0.y } }
             .max()
-        return CGPoint(x: x, y: (bottom ?? 40) + GraphGeom.nodeHeight + 22)
+        return CGPoint(x: x, y: (bottom ?? 36) + GraphGeom.nodeHeight + 20)
     }
 
     func autoArrange() {
-        let leftX: CGFloat = 72, rightX: CGFloat = 452, topY: CGFloat = 64, gap: CGFloat = GraphGeom.nodeHeight + 22
+        let leftX: CGFloat = 64, rightX: CGFloat = 400, topY: CGFloat = 56, gap: CGFloat = GraphGeom.nodeHeight + 20
         let sources = gnodes.filter { $0.isSource }.sorted(by: nodeOrder)
         let sinks = gnodes.filter { !$0.isSource }.sorted(by: nodeOrder)
         for (i, n) in sources.enumerated() { positions[n.id] = CGPoint(x: leftX, y: topY + CGFloat(i) * gap) }
@@ -303,6 +310,29 @@ final class GraphEditorModel: ObservableObject {
         pan = .zero
         scheduleSave()
     }
+
+    /// Tidy = snap, not reorganise: round every node's corner onto the dot grid so they line up,
+    /// keeping the layout the user built rather than re-columning it.
+    func snapToGrid() {
+        let step = GraphGeom.gridStep
+        for n in gnodes {
+            guard let o = positions[n.id] else { continue }
+            positions[n.id] = CGPoint(x: (o.x / step).rounded() * step,
+                                      y: (o.y / step).rounded() * step)
+        }
+        scheduleSave()
+    }
+
+    // MARK: Adding nodes at the cursor (right-click on the canvas background)
+
+    /// Canvas-space top-left that centres a freshly added node on the last cursor position.
+    private func originForSpawn() -> CGPoint {
+        CGPoint(x: lastPoint.x - pan.width - GraphGeom.nodeWidth / 2,
+                y: lastPoint.y - pan.height - GraphGeom.nodeHeight / 2)
+    }
+    func addOutputAtCursor(_ d: AudioDevice) { pendingPlacement = originForSpawn(); app.addOutputNode(d) }
+    func addInputAtCursor(_ d: AudioDevice)  { pendingPlacement = originForSpawn(); app.addInputNode(d) }
+    func addTapAtCursor(_ a: TappableApp)    { pendingPlacement = originForSpawn(); app.addTapNode(a) }
 
     private func nodeOrder(_ a: GNode, _ b: GNode) -> Bool {
         func rank(_ n: GNode) -> Int {
@@ -339,6 +369,7 @@ final class GraphEditorModel: ObservableObject {
     /// drives this, so nothing — a full-canvas hit view, a knob sitting on a wire — can steal or block
     /// hover. Nodes win over wires; a generous halo/disc keeps the delete bubble and knob reachable.
     func hoverAt(_ p: CGPoint) {
+        lastPoint = p
         if let id = nodeHit(p) {
             if hoveredNode != id { hoveredNode = id }
             if hoveredEdge != nil { hoveredEdge = nil }
@@ -377,7 +408,7 @@ final class GraphEditorModel: ObservableObject {
             let to = CGPoint(x: b.x + pan.width, y: b.y + pan.height)
             let mid = curveMidpoint(from, to)
             let dm = hypot(p.x - mid.x, p.y - mid.y)
-            let d = dm <= 26 ? dm : distanceToCurve(p, from, to)   // knob/badge area counts as the edge
+            let d = dm <= 30 ? dm : distanceToCurve(p, from, to)   // knob/badge area counts as the edge
             if d <= 16, best == nil || d < best!.1 { best = (e.id, d) }
         }
         return best?.0
@@ -423,11 +454,19 @@ final class GraphEditorModel: ObservableObject {
         guard src != dst else { return }
         if dst == Self.programID {
             // Screen-share: only an app tap can be streamed. Sets stage.json; the Stage obeys.
-            if case .graph(.tap(let b))? = descByID[src]?.kind { app.setStageApp(b) }
+            // Re-drawing the wire that's already there toggles that app's share off.
+            if case .graph(.tap(let b))? = descByID[src]?.kind {
+                app.setStageApp(app.stageConfig.bundleID == b ? nil : b)
+            }
             return
         }
         if src == Self.programID { return }   // the program bus is a sink only
-        app.wireBus(from: src, to: dst, pairs: busPairs(from: src, to: dst))
+        // Re-drawing an existing bus removes it (toggle); otherwise wire it.
+        if app.graph.links.contains(where: { $0.from.node == src && $0.to.node == dst }) {
+            app.disconnectBus(from: src, to: dst)
+        } else {
+            app.wireBus(from: src, to: dst, pairs: busPairs(from: src, to: dst))
+        }
     }
 
     private func nearestNode(to point: CGPoint, wantSource: Bool, maxDist: CGFloat) -> NodeID? {
