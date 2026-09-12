@@ -109,6 +109,14 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
 - Pin + follow + hand-back all work with real AirPods; the user confirmed Control Center switching.
 - iOS steals the AirPods regardless of our running IOProc. Can't be prevented from this side.
 - App end-to-end: Music → Pancake → aggregate → AirPods, audible, once the Microphone grant is in place.
+- **Three-bus streaming, verified live (2026-09-12).** `Pancake Program` (`PancakeProgram_UID`,
+  `kObjectID_Device3`, a controls-free silent loopback — the Stage renders the shared app into it)
+  works end to end. With the Stage tapping Ableton, `pancake probe-aggregate "Pancake Program"`
+  read peaks ~1.0 while `"Pancake Mic"` read ~0.003 (no bleed); a live Discord *window*-share of the
+  Stage got "green on both" — friends heard Ableton clearly, no echo. Stage renders into Program
+  (not Pancake Mic), has an app picker, and splits the shared mirror window from a separate Controls
+  window (both excluded from the capture). Adding Program did NOT churn the engine — it logged
+  `devices changed: same set, ignoring` (Program isn't graph-relevant).
 - The AirPods' *own* hardware volume (elements 1+2, no element 0) is rewritten by the iPhone when it
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
   just makes everything quiet (found at 0.5). `swift tools/setvol.swift F0-04-E1-C9-6A-F8:output 1.0`

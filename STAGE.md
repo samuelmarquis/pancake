@@ -8,6 +8,24 @@ Discord with clean stereo app-audio and **no echo**.
 
 ---
 
+## Status (updated 2026-09-12) — the core is DONE and verified live
+
+The dedicated **Pancake Program** bus now exists and the Stage renders into it. Verified end to
+end: with the Stage tapping Ableton, a probe read **Pancake Program at peaks ~1.0** (the program,
+loud and clean) while **Pancake Mic read ~0.003** (dead silent — no bleed). Then a live Discord
+window-share of the Stage got a **"green on both"**: friends heard Ableton clearly and *no* echo of
+themselves. The v0 wart is gone.
+
+- ✅ **#1 Pancake Program device** — added to the driver (`kObjectID_Device3`), installed, verified.
+- ✅ **#2 App picker** — Stage lists tappable apps and renders whichever you pick, into Program.
+- ✅ **#4 Menu app redeploy** — running the fresh build (ignores the stage aggregate; DAW button gone).
+- ⬜ **#3 Graph integration** — still a proposal (below); do it when the graph editor work starts.
+- ⬜ **#5 Polish** — remaining nice-to-haves (below); e.g. auto-tap when the target app appears.
+
+The rest of this doc is the original design writeup, kept for context; completed items are marked.
+
+---
+
 ## Why Stage exists (the problem, settled)
 
 Discord's full-screen "share sound" captures **all system audio** on your Mac — including the
@@ -34,10 +52,11 @@ and the call audio is never in scope.
 - **Signing**: both apps now sign with a stable self-signed identity ("Pancake Dev"), so TCC grants
   (Microphone, Screen Recording) survive rebuilds. No more permission churn.
 
-### The v0 wart to fix
-The Stage renders into **Pancake Mic**, which is also Discord's *voice* input. So the program
-(Ableton) bleeds into the voice channel — mono, voice-processed — underneath the clean stream. It's
-masked in practice, but it's wrong. The fix is a dedicated silent sink (below).
+### The v0 wart to fix — ✅ FIXED
+The v0 Stage rendered into **Pancake Mic**, which is also Discord's *voice* input, so the program
+(Ableton) bled into the voice channel — mono, voice-processed — underneath the clean stream. Fixed:
+the Stage now renders into the dedicated **Pancake Program** bus (item #1 below), which nobody
+monitors and which is not a voice input. Verified: Pancake Mic reads silence while Program is loud.
 
 ---
 
@@ -77,7 +96,7 @@ self-taps and renders. The graph is the *config* (which apps are in the program)
 
 ## The build items
 
-### 1. `Pancake Program` — a silent sink device (driver)
+### 1. `Pancake Program` — a silent sink device (driver) — ✅ DONE
 - **Why**: give the Stage a place to render that nobody monitors, so the program never bleeds into
   the voice channel (kills the v0 wart) and the mental model stays three clean buses.
 - **What**: add a third device to `driver/Pancake.c` — a silent loopback (or output-only) device,
@@ -90,7 +109,7 @@ self-taps and renders. The graph is the *config* (which apps are in the program)
 - **Rejected alternative**: reuse Pancake Mic + move Discord voice to the built-in mic. Works with
   no driver change but is semantically muddy and repurposes a device by its old name. Not worth it.
 
-### 2. App picker in Stage (stop hardcoding Ableton)
+### 2. App picker in Stage (stop hardcoding Ableton) — ✅ DONE
 - **Why**: you should choose what to share; Ableton is just today's default.
 - **What**: a small control in the Stage window (an `NSPopUpButton` or a menu) listing tappable
   apps (`ProcessTap.processes()` ∩ regular running apps, the logic drafted in the removed AppModel
@@ -107,46 +126,49 @@ self-taps and renders. The graph is the *config* (which apps are in the program)
 - **Open question**: do the menu app (engine) and the Stage both create taps on the same app? Two
   taps is harmless but wasteful. Decide whether the Stage is the sole tap owner for the program.
 
-### 4. Redeploy the menu app (pending, already coded)
-The running menu app is a build or two behind. Code already written but **not deployed**:
-- `relevantDeviceUIDs` now ignores `com.pancake.stage.aggregate` (so Stage start/stop doesn't blip
-  the monitor). **Needs a `make app` + relaunch to take effect.**
-- The DAW-button removal (menu + AppModel) and the tolerant `Policy` Codable are in the source but
-  the live app predates them.
-- Do this at a convenient moment (relaunch briefly drops monitor audio).
+### 4. Redeploy the menu app — ✅ DONE
+Rebuilt and relaunched during the driver-install window:
+- `relevantDeviceUIDs` ignores `com.pancake.stage.aggregate`, so Stage start/stop doesn't blip the
+  monitor — confirmed live: the log shows `devices changed: same set, ignoring` when Pancake Program
+  appeared, instead of churning the aggregate.
+- The DAW-button removal and the tolerant `Policy` Codable are now live.
 
-### 5. Polish / robustness
-- **Multiple displays**: let the user pick which display to mirror (SCK lists them; v0 grabs the
-  first).
-- **Ableton not running / restarts**: v0 taps once at launch. Watch the HAL process list
-  (`kAudioHardwarePropertyProcessObjectList`) and (re)create the tap when the target app appears.
-- **Mirror UX**: the status strip is bring-up scaffolding; replace with a clean overlay (or hide it
-  during share). Consider a subtle "you are sharing" affordance. Check cursor rendering and
-  retina/resolution (v0 uses `display.width*2`).
+### 5. Polish / robustness (remaining)
+- **Auto-tap when the target appears**: the picker refreshes on open (so an app that launched after
+  the Stage still shows up), but you must re-pick it. If a preferred app (Ableton) launches *after*
+  the Stage, auto-select/re-tap it. Watch `kAudioHardwarePropertyProcessObjectList`. (Hit live this
+  session: Ableton opened after the Stage, so the launch-time auto-select missed it.)
+- **Multiple displays**: let the user pick which display to mirror (SCK lists them; v0 grabs first).
+- **Multiple apps in the program**: the aggregate already supports multiple taps; make the copy
+  IOProc a sum and let the picker multi-select.
+- **Mirror UX**: status now lives in the separate Controls window (not in the shared mirror). Nice
+  next steps: a "you are sharing" affordance, cursor/retina checks (uses `display.width*2`).
 - **Latency/perf**: fine for plugin-GUI iteration; sanity-check CPU/GPU during a long session.
-- **Lifecycle**: quit cleanly (StageAudio.stop already runs on terminate); make sure the tap +
-  aggregate are always torn down.
+- **Lifecycle**: quit cleanly (StageAudio.stop runs on terminate; app quits on last window close);
+  make sure the tap + aggregate are always torn down.
 
 ---
 
 ## Suggested sequencing
 
-1. **Redeploy the menu app** (#4) at a good moment — cheap, removes the Stage-start blip, ships the
-   already-written cleanups.
-2. **`Pancake Program` device** (#1) + point StageAudio at it — kills the voice bleed. This is the
-   correctness fix; do it before leaning on Stage day-to-day.
-3. **App picker** (#2) — makes Stage generally useful.
-4. **Graph integration** (#3) — when the graph editor work starts; taps become first-class program
+1. ✅ **Redeploy the menu app** (#4).
+2. ✅ **`Pancake Program` device** (#1) + point StageAudio at it — the correctness fix.
+3. ✅ **App picker** (#2).
+4. ⬜ **Graph integration** (#3) — when the graph editor work starts; taps become first-class program
    sources.
-5. **Polish** (#5) — as it annoys you.
+5. ⬜ **Polish** (#5) — as it annoys you; the top one is auto-tap when the target app appears.
 
 ## Current repo state (for whoever picks this up)
 
-- Nothing is committed yet this session — `git status` shows the whole `Sources/`, `driver/`, etc.
-  as new/modified. A commit checkpoint before the next leg would be wise.
-- Stage lives in `Sources/PancakeStage` (`PancakeStage.swift` = app/video, `StageAudio.swift` =
-  tap→sink, `main.swift` = entry). Built with `make stage` / `make run-stage`; bundle id
-  `com.pancake.stage`; Info.plist at `packaging/Stage-Info.plist` (declares Microphone).
+- Committed and pushed to `origin/devel`: the checkpoint of the whole system, the `Pancake Program`
+  driver clone, and the Stage app-picker. `git log` has the details.
+- The driver clone (adding `kObjectID_Device3`) was applied by a self-checking transform script that
+  asserts each edit's match count — see the commit `driver: add Pancake Program`. Cloning a *fourth*
+  device would follow the same Device2/Device3 pattern.
+- Stage lives in `Sources/PancakeStage` (`PancakeStage.swift` = app/video/picker, `StageAudio.swift`
+  = tap→Program sink, `main.swift` = entry). Two windows: the shared **Pancake Stage** mirror and a
+  **Pancake Stage — Controls** window (picker + status, excluded from the capture). Built with
+  `make stage` / `make run-stage`; bundle id `com.pancake.stage`; `packaging/Stage-Info.plist`.
 - The process-tap machinery (`ProcessTap`, tap support in `ChannelLayout`/`MatrixCompiler`/`Engine`,
   `Graph.setTap`/`.tap` nodes) is in PancakeCore and reused by Stage. It was briefly wired into the
   menu (a "Send DAW to Discord" button) and removed — that path mangled music through Discord's
