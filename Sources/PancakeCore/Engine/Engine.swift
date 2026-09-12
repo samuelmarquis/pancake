@@ -15,6 +15,10 @@ import Foundation
 ///
 /// Gain-only changes skip all that and atomically swap the matrix under the running IOProc.
 public final class Engine {
+    /// Bundle ids the engine must never build a process tap for: pancake's own processes. Tapping the
+    /// process that drives the IOProc creates runaway feedback that bypasses the hub volume/mute.
+    public static let selfBundleIDs: Set<String> = ["com.pancake.app", "com.pancake.stage"]
+
     public struct Configuration {
         /// UID of the virtual device apps play into. The engine reads it.
         public var hubUID = "Pancake_UID"
@@ -537,8 +541,15 @@ public final class Engine {
                     notes.append("\(node.label ?? uid) is not connected; skipping")
                     g.remove(node.id)
                 }
-            case .tap:
-                break   // handled in rebuild: a tap is created if the app is live, else the node is dropped there
+            case .tap(let bundleID):
+                // Never tap pancake's own processes. Tapping the app that drives the IOProc re-captures
+                // whatever it just wrote to the output and re-injects it — runaway digital feedback that
+                // sidesteps the hub's volume/mute. Refuse it here so no graph (edited, stale, or hand-
+                // written) can ever arm it. Otherwise: handled in rebuild (tapped iff the app is live).
+                if Engine.selfBundleIDs.contains(bundleID) {
+                    notes.append("refusing to tap \(bundleID): that's pancake itself — it would feed back. Dropping.")
+                    g.remove(node.id)
+                }
             case .hub, .mic:
                 break
             }

@@ -18,7 +18,7 @@ public struct TappableApp: Hashable {
 /// sort first, then alphabetical.
 public func tappableApps() -> [TappableApp] {
     var byBundle: [String: AudioProcess] = [:]
-    for p in ProcessTap.processes() where !p.bundleID.isEmpty {
+    for p in ProcessTap.processes() where !p.bundleID.isEmpty && !Engine.selfBundleIDs.contains(p.bundleID) {
         if let e = byBundle[p.bundleID] {
             if p.isRunningOutput && !e.isRunningOutput { byBundle[p.bundleID] = p }
         } else {

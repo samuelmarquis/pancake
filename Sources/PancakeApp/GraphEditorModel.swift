@@ -147,6 +147,7 @@ final class GraphEditorModel: ObservableObject {
     private var panStart: CGSize?
     private var knobGainStart: Float?
     private var hoverClear: DispatchWorkItem?
+    private var edgeHoverClear: DispatchWorkItem?
 
     init(app: AppModel) {
         self.app = app
@@ -341,6 +342,20 @@ final class GraphEditorModel: ObservableObject {
         hoverClear?.cancel()
         let work = DispatchWorkItem { [weak self] in if self?.hoveredNode == id { self?.hoveredNode = nil } }
         hoverClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    /// Sticky edge hover: the knob/badge sits *on top of* the wire's hit region, so crossing onto it
+    /// would otherwise toggle hover off→on and flicker. A short grace + hovering the knob keeping the
+    /// edge alive smooths it. Never clears while a knob drag is in flight.
+    func hoverEdge(_ id: String) { edgeHoverClear?.cancel(); hoveredEdge = id }
+    func unhoverEdge(_ id: String) {
+        edgeHoverClear?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.hoveredEdge == id && self.knobEdge == nil { self.hoveredEdge = nil }
+        }
+        edgeHoverClear = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
 

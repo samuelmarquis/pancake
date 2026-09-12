@@ -248,16 +248,14 @@ private struct EdgeInteractor: View {
             // keeps the wire "hovered" and the knob doesn't flicker away.
             Color.clear
                 .contentShape(EdgeHitShape(from: from, to: to, width: 20, knob: mid, knobRadius: 24))
-                .onHover { inside in
-                    if inside { editor.hoveredEdge = edge.id }
-                    else if editor.hoveredEdge == edge.id { editor.hoveredEdge = nil }
-                }
+                .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
 
             if hot {
                 switch edge.kind {
                 case .audio:
                     Knob(gain: edge.gain)
                         .position(mid)
+                        .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
                         // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
                         .gesture(
                             DragGesture(minimumDistance: 3)
@@ -272,6 +270,7 @@ private struct EdgeInteractor: View {
                 case .stage:
                     StageBadge()
                         .position(mid)
+                        .onHover { $0 ? editor.hoverEdge(edge.id) : editor.unhoverEdge(edge.id) }
                         .help("Screen-share source. ⌫ to stop sharing this app.")
                 }
             }
@@ -449,8 +448,7 @@ private struct TopBar: View {
         .controlSize(.small)
         .padding(.leading, 82)   // clear the traffic lights
         .padding(.trailing, 14)
-        .padding(.vertical, 3)   // short enough to sit in the title-bar band, flush with the lights
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)   // title-bar band height → flush with the lights
         .background(.regularMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(.primary.opacity(0.08)), alignment: .bottom)
     }
