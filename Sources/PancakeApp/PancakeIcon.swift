@@ -26,9 +26,8 @@ enum PancakeIcon {
         return image
     }
 
-    /// A gentle tilt so the stack reads as a short stack seen from a low angle rather
-    /// than a flat cone. Applied to the whole glyph.
-    private static let tiltDegrees: CGFloat = -7
+    /// Whole-glyph tilt, in degrees. Kept at 0 so the stack sits upright on its axis.
+    private static let tiltDegrees: CGFloat = 0
 
     /// How much of the box the glyph fills. >1 enlarges it about the centre; kept
     /// safely under the point where the tilted silhouette would clip the bounds.
