@@ -141,12 +141,12 @@ private struct GraphCanvas: View {
         }
     }
 
-    /// The iOS-style floating delete bubble at a hovered node's top-left corner.
+    /// The iOS-style floating delete bubble at a hovered node's top-right corner.
     private var deleteBubbles: some View {
         ForEach(editor.gnodes) { node in
             if editor.hoveredNode == node.id, !node.isPermanent, let origin = editor.positions[node.id] {
                 DeleteBubble(onRemove: { editor.removeNode(node.id) })
-                    .position(CGPoint(x: origin.x, y: origin.y).offset(editor.pan))
+                    .position(CGPoint(x: origin.x + GraphGeom.nodeWidth, y: origin.y).offset(editor.pan))
             }
         }
     }
@@ -254,11 +254,20 @@ private struct EdgeInteractor: View {
     private var mid: CGPoint { bezierMid(from, to) }
     private var hot: Bool { editor.hoveredEdge == edge.id || editor.knobEdge == edge.id }
 
+    /// The wire's endpoint colours (source hue on the left, sink hue on the right) — the knob wears
+    /// the same gradient the wire does.
+    private var wireColors: (Color, Color) {
+        let d = editor.descByID
+        let a = d[edge.from].map { GraphPalette.color(for: $0.kind) } ?? .gray
+        let b = d[edge.to].map { GraphPalette.color(for: $0.kind) } ?? .gray
+        return (a, b)
+    }
+
     var body: some View {
         if hot {
             switch edge.kind {
             case .audio:
-                Knob(gain: edge.gain)
+                Knob(gain: edge.gain, c0: wireColors.0, c1: wireColors.1)
                     .position(mid)
                     // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
                     .gesture(
@@ -284,8 +293,11 @@ private struct EdgeInteractor: View {
 /// gain, with the dB value large in the centre. Drag it to set gain, double-click for unity.
 private struct Knob: View {
     let gain: Float
+    let c0: Color      // wire's left (source) hue
+    let c1: Color      // wire's right (sink) hue
     private var fraction: CGFloat { CGFloat((min(12, max(-48, GainMath.dB(gain))) + 48) / 60) }
-    private let tint = Color(red: 0.95, green: 0.26, blue: 0.21)   // mock red
+    /// The wire's own gradient, left-to-right across the knob — worn by both the filled arc and text.
+    private var wire: LinearGradient { LinearGradient(colors: [c0, c1], startPoint: .leading, endPoint: .trailing) }
 
     var body: some View {
         ZStack {
@@ -293,15 +305,15 @@ private struct Knob: View {
                 .frame(width: 38, height: 38)
                 .overlay(Circle().stroke(.primary.opacity(0.10), lineWidth: 1))
             GaugeArc(fraction: 1)
-                .stroke(tint.opacity(0.16), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(.primary.opacity(0.12), style: StrokeStyle(lineWidth: 5, lineCap: .round))
             GaugeArc(fraction: fraction)
-                .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(wire, style: StrokeStyle(lineWidth: 5, lineCap: .round))
             Text(GainMath.label(gain))
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
-                .foregroundStyle(tint)
+                .foregroundStyle(wire)
                 .padding(.horizontal, 8)
         }
         .frame(width: 48, height: 48)
