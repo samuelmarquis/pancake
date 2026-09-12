@@ -124,11 +124,12 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
   (no Dock icon, no control panel): one chrome-free mirror window, **always parked off-desktop** at a
   1pt on-screen sliver — invisible to you but still composited and listed in Discord's window picker
   (Discord lists it by its `.titled` title; `canJoinAllSpaces` keeps it on Discord's current desktop;
-  it matches the display's aspect so there are no letterbox bars). You drive it entirely from the menu
-  bar's **Screen share** section (start/stop + audio-source picker), which writes
-  `~/.config/pancake/stage.json` (`StageConfig`); the Stage watches that file and reconciles its tap —
-  the file is the IPC, same pattern as the graph. A preferred app (Ableton) is auto-tapped the moment
-  it becomes tappable (a `kAudioHardwarePropertyProcessObjectList` listener), one-shot until you
+  it matches the display's aspect so there are no letterbox bars). The menu bar's **Screen share**
+  section is just start/stop + status now; the **source** (which app is streamed) is chosen in the
+  graph — wire an app's process-tap node to the **Pancake Program** node (see the graph window). Both
+  write `~/.config/pancake/stage.json` (`StageConfig`); the Stage watches that file and reconciles its
+  tap — the file is the IPC, same pattern as the graph. A preferred app (Ableton) is auto-tapped the
+  moment it becomes tappable (a `kAudioHardwarePropertyProcessObjectList` listener), one-shot until you
   choose otherwise. Quit it via the menu's **Stop screen share** or `make stop-stage`.
 - The AirPods' *own* hardware volume (elements 1+2, no element 0) is rewritten by the iPhone when it
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
@@ -155,12 +156,24 @@ derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, en
 5. Sleep/wake soak. Sample-rate change on the master (e.g. DDJ-FLX4 at 44.1k) → rebuild path is
    untested.
 6. ✅ **Graph window** — the menu's **Show graph…** opens a pipewire-style patchbay
-   (`Sources/PancakeApp/GraphEditor*.swift`): sources (Pancake, inputs, app taps) on the left with
-   output ports, sinks (outputs, Pancake Mic) on the right with input ports, bezier wires between.
-   Drag port→port to route channel-by-channel; select a wire to set gain (dB) or disconnect; add
-   nodes from a palette of live devices/tappable apps; drag nodes and pan the canvas. Edits apply to
-   the running engine at once and persist to `graph.json`; **node positions live in a separate
-   `~/.config/pancake/graph-layout.json`** so the graph IPC stays clean. Live wires draw solid,
-   desired-but-inactive (device absent / app not running) dashed + dim. Code-complete and compiles
-   clean; **the on-screen render still needs a live click to confirm** (I can't drive the menu from
-   a shell). Remaining polish if wanted: zoom, multi-select, marquee, snapping.
+   (`Sources/PancakeApp/GraphEditor*.swift`). Sources (Pancake, inputs, app taps) on the left, sinks
+   (outputs, Pancake Mic, **Pancake Program**) on the right; **one bus port per side** (L/R is fungible
+   — a connection is a whole stereo/mono bus, drawn as bundled strands, never split). Drag between
+   ports to route; the mapping is chosen for you (mono fans to both, stereo sums to mono, else
+   straight). Wires draw in one `Canvas` with a **colour gradient** blending the source node's hue into
+   the sink's; live edges solid, waiting edges dashed + dim. **Gain is an in-place knob**: hover a wire,
+   a rotary knob appears at its midpoint — drag to set gain, double-click for unity. `⌫` removes the
+   hovered wire (or hovered node; nodes also have a hover ✕). Add nodes from the palette (live
+   devices/tappable apps); drag nodes, pan the canvas, **Tidy** re-columns. Edits apply to the engine at
+   once and persist to `graph.json`; **node positions live in a separate
+   `~/.config/pancake/graph-layout.json`** so the IPC stays clean. **Screen-share is integrated**: the
+   **Pancake Program** node is the stream bus; wiring an app tap → Program sets the Stage's source
+   (backed by `stage.json`, *not* the graph, so the engine never double-taps). Liquid-glass buttons
+   where the CLT SDK has them; top bar sits on the traffic-light row; window spawns at min size.
+   Remaining polish if wanted: zoom, multi-select, marquee, snapping.
+
+   Deliberately NOT done — **plugin (AU/VST/CLAP) inserts in the graph.** It would break invariant #3:
+   the IOProc is pure C gain-routing (`out += in*gain`, no alloc/locks/ObjC/Swift), and hosting a plugin
+   means calling its render inside that callback. Doing it RT-safely is a separate project (a side
+   `AVAudioEngine` graph, or an out-of-line render chain feeding a tap), not a contained change. Left
+   for a future leg; the graph model is bipartite (source-out → sink-in) on purpose.
