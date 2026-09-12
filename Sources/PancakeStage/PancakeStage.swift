@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreAudio
 import CoreMedia
 import ScreenCaptureKit
 import PancakeCore
@@ -138,14 +139,28 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var controlsWindow: NSWindow!
     private var capture: Capture!
     private var appPopup: NSPopUpButton!
+    private var hideCheckbox: NSButton!
     private var videoLabel: NSTextField!
     private var audioLabel: NSTextField!
+    private var shareLabel: NSTextField!
     private let audio = StageAudio()
 
     /// The app currently being shared, if any.
     private var currentBundleID: String?
-    /// Preferred app to select automatically at launch when it's available.
+    /// Preferred app to select automatically when it becomes available.
     private let preferredBundleID = "com.ableton.live"
+    /// Auto-select stays armed until the user makes any manual pick (including "None"), at which
+    /// point we stop second-guessing them. This is what makes "launch the Stage, then open Ableton"
+    /// just work without us overriding a deliberate choice later.
+    private var autoSelectArmed = true
+
+    /// Fires when the HAL's process set changes — i.e. an app becomes (un)tappable. Drives auto-tap.
+    private var processListener: PropertyListener?
+
+    /// Hidden-mirror state. When hidden we park the (full-size) mirror window at a 1pt on-screen
+    /// sliver so it stays composited and Discord-shareable but is invisible on your desktop.
+    private var mirrorHidden = false
+    private var lastVisibleFrame: NSRect?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -176,6 +191,10 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:
             audioLabel.stringValue = "audio: microphone access denied — enable it in Settings › Privacy › Microphone"
         }
+
+        // Report — for real, via ScreenCaptureKit, the same API Discord uses — whether the mirror
+        // window is shareable. Gives us ground truth on the hidden-window question once frames flow.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.logShareability("launch") }
     }
 
     // MARK: Windows
@@ -193,7 +212,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func buildControlsWindow() {
-        let width: CGFloat = 440, height: CGFloat = 150
+        let width: CGFloat = 460, height: CGFloat = 200
         controlsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                   styleMask: [.titled, .closable, .miniaturizable],
                                   backing: .buffered, defer: false)
@@ -210,7 +229,7 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let heading = NSTextField(labelWithString: "Share audio from:")
         heading.font = .systemFont(ofSize: 12, weight: .semibold)
-        heading.frame = NSRect(x: 16, y: height - 34, width: 200, height: 18)
+        heading.frame = NSRect(x: 16, y: height - 30, width: 200, height: 18)
         container.addSubview(heading)
 
         appPopup = NSPopUpButton(frame: NSRect(x: 16, y: height - 64, width: width - 32, height: 26), pullsDown: false)
@@ -222,10 +241,16 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hint = NSTextField(labelWithString: "Window-share the “Pancake Stage” window in Discord.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
-        hint.frame = NSRect(x: 16, y: height - 88, width: width - 32, height: 16)
+        hint.frame = NSRect(x: 16, y: height - 86, width: width - 32, height: 16)
         container.addSubview(hint)
 
-        videoLabel = statusField(y: 30, in: container, width: width); videoLabel.stringValue = "video: starting…"
+        hideCheckbox = NSButton(checkboxWithTitle: "Hide mirror window (keep it shareable)",
+                                target: self, action: #selector(toggleHidden(_:)))
+        hideCheckbox.frame = NSRect(x: 14, y: height - 116, width: width - 28, height: 22)
+        container.addSubview(hideCheckbox)
+
+        shareLabel = statusField(y: 54, in: container, width: width); shareLabel.stringValue = "shareable: checking…"
+        videoLabel = statusField(y: 32, in: container, width: width); videoLabel.stringValue = "video: starting…"
         audioLabel = statusField(y: 10, in: container, width: width); audioLabel.stringValue = "audio: waiting for microphone access…"
 
         controlsWindow.contentView = container
@@ -242,18 +267,101 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return l
     }
 
-    // MARK: Picker
+    // MARK: Hidden mirror
 
+    @objc private func toggleHidden(_ sender: NSButton) {
+        setMirrorHidden(sender.state == .on)
+    }
+
+    /// Park the mirror window at a 1pt on-screen sliver (bottom-left corner, effectively invisible)
+    /// or restore it. We keep 1pt on-screen on purpose: a fully off-screen window can report
+    /// isOnScreen == false and stop being composited, which would drop it from Discord's picker or
+    /// freeze the shared frame. A sliver keeps it "visible" (drawing + capturable) yet out of sight.
+    private func setMirrorHidden(_ hidden: Bool) {
+        guard hidden != mirrorHidden else { return }
+        mirrorHidden = hidden
+        if hidden {
+            lastVisibleFrame = mirrorWindow.frame
+            let screen = mirrorWindow.screen ?? NSScreen.main ?? NSScreen.screens.first
+            let f = mirrorWindow.frame
+            if let s = screen {
+                // Put the window's top-right corner 1pt inside the screen's bottom-left corner.
+                let origin = NSPoint(x: s.frame.minX + 1 - f.width, y: s.frame.minY + 1 - f.height)
+                mirrorWindow.setFrameOrigin(origin)
+            }
+            mirrorWindow.orderFront(nil)   // stay composited while parked
+            NSLog("stage: mirror hidden (parked off-desktop, still shareable)")
+        } else {
+            if let prev = lastVisibleFrame { mirrorWindow.setFrame(prev, display: true) }
+            else { mirrorWindow.center() }
+            mirrorWindow.makeKeyAndOrderFront(nil)
+            NSLog("stage: mirror shown")
+        }
+        // Re-measure shareability after the move settles.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.logShareability(hidden ? "hidden" : "shown") }
+    }
+
+    /// Ask ScreenCaptureKit (Discord's own API) whether our mirror window is listed and on-screen,
+    /// in both filter modes. onScreenWindowsOnly:true is what a typical window picker uses, so if we
+    /// appear there we should appear in Discord's picker too.
+    private func logShareability(_ tag: String) {
+        guard let win = mirrorWindow else { return }
+        let id = CGWindowID(win.windowNumber)
+        Task { @MainActor in
+            var summary: [String] = []
+            for onScreenOnly in [true, false] {
+                let mode = onScreenOnly ? "onScreen" : "all"
+                if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: onScreenOnly) {
+                    if let w = content.windows.first(where: { $0.windowID == id }) {
+                        NSLog("stage: shareability[\(tag)/\(mode)]: LISTED title=\(w.title ?? "nil") isOnScreen=\(w.isOnScreen) frame=\(w.frame)")
+                        summary.append("\(mode)=\(w.isOnScreen ? "yes" : "on-list")")
+                    } else {
+                        NSLog("stage: shareability[\(tag)/\(mode)]: NOT listed (windowID \(id))")
+                        summary.append("\(mode)=no")
+                    }
+                } else {
+                    NSLog("stage: shareability[\(tag)/\(mode)]: query failed")
+                    summary.append("\(mode)=?")
+                }
+            }
+            shareLabel?.stringValue = "shareable: \(summary.joined(separator: "  "))"
+        }
+    }
+
+    // MARK: Auto-tap when the target app appears
+
+    /// Listen for changes to the HAL process set. When the preferred app becomes tappable and we're
+    /// still idle (user hasn't picked anything yet), select it automatically.
     private func enableAudioPicker() {
+        installProcessListener()
         rebuildPopup()
-        // Auto-select the preferred app (Ableton) if it's tappable right now; otherwise wait for the
-        // user to choose. We don't auto-tap a random app.
-        if tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
+        // Auto-select the preferred app (Ableton) if it's tappable right now; otherwise wait — either
+        // for the user to choose, or for the process listener to catch it launching.
+        if autoSelectArmed && tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
             selectAndShare(preferredBundleID)
         } else {
             audioLabel.stringValue = "audio: pick an app to share ↑"
         }
     }
+
+    private func installProcessListener() {
+        guard processListener == nil else { return }
+        processListener = try? systemAudioObject.addPropertyListener(
+            .init(kAudioHardwarePropertyProcessObjectList), queue: .main) { [weak self] in
+            self?.processListChanged()
+        }
+    }
+
+    private func processListChanged() {
+        rebuildPopup()   // keep the list + ● indicators honest as apps come and go
+        guard autoSelectArmed, currentBundleID == nil else { return }
+        if tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
+            NSLog("stage: preferred app became tappable — auto-selecting")
+            selectAndShare(preferredBundleID)
+        }
+    }
+
+    // MARK: Picker
 
     /// Rebuild the popup's items from the current process list, preserving the selection.
     private func rebuildPopup() {
@@ -290,6 +398,8 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func pickApp(_ sender: NSPopUpButton) {
+        // Any manual selection disarms auto-tap — we stop overriding the user's choice from here on.
+        autoSelectArmed = false
         let bid = (sender.selectedItem?.representedObject as? String) ?? ""
         if bid.isEmpty {
             audio.stop()
@@ -314,6 +424,9 @@ final class StageDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if menu === appPopup.menu { rebuildPopup() }
     }
 
-    func applicationWillTerminate(_ n: Notification) { audio.stop() }
+    func applicationWillTerminate(_ n: Notification) {
+        processListener?.remove()
+        audio.stop()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 }
