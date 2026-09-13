@@ -203,28 +203,47 @@ private struct MenuRow<Label: View>: View {
 }
 
 /// An absent Bluetooth output rendered as an actual reconnect button: it highlights on hover, the
-/// icon spins on click, and the subtitle flips to "reconnecting…" for a beat — so the click clearly
-/// registers. Reconnect is best-effort (a paired phone may be holding the AirPods), so this shows the
-/// request went out; whether they come back is up to Bluetooth.
+/// icon spins on click, and the subtitle flips to "reconnecting…" — so the click clearly registers.
+/// Reconnect is best-effort (a paired phone may be holding the AirPods): if the device comes back it
+/// turns into a normal present row on its own, so a row still sitting here after the timeout means the
+/// attempt failed — then the subtitle reads "unreachable". A per-click generation guards against a
+/// stale timer flipping a fresh attempt.
 private struct ReconnectRow: View {
     let item: MenuOutput
     let glyph: String
     let selected: Bool
     let action: () -> Void
+
+    private static let timeout: TimeInterval = 8   // matches the engine's own retry cadence
+
+    private enum Phase { case idle, reconnecting, unreachable }
+    @State private var phase: Phase = .idle
     @State private var hover = false
     @State private var spins = 0
-    @State private var reconnecting = false
+    @State private var attempt = 0
+
+    private var subtitle: String {
+        switch phase {
+        case .idle: return "not connected"
+        case .reconnecting: return "reconnecting…"
+        case .unreachable: return "unreachable"
+        }
+    }
 
     var body: some View {
         Button {
             withAnimation(.easeInOut(duration: 0.7)) { spins += 1 }
-            reconnecting = true
+            attempt += 1
+            let mine = attempt
+            phase = .reconnecting
             action()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { reconnecting = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) {
+                if mine == attempt, phase == .reconnecting { phase = .unreachable }
+            }
         } label: {
             HStack(spacing: 0) {
                 DeviceLabel(glyph: glyph, name: item.name,
-                            subtitle: reconnecting ? "reconnecting…" : "not connected",
+                            subtitle: subtitle,
                             battery: item.battery, selected: selected, dimmed: true, trailing: nil)
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12, weight: .semibold))
