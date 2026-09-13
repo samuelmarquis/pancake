@@ -153,7 +153,7 @@ struct Record: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Record a source to a WAV via a recorder node (proves the recorder path). Stop the app first — one engine at a time.")
     @OptionGroup var verbose: Verbose
     @OptionGroup var config: ConfigOption
-    @Option(name: .long, help: "What to record: 'hub' (everything playing into Pancake) or an input device name/UID.") var source: String = "hub"
+    @Option(name: .long, help: "What to record: 'hub' (everything playing), 'tap:<bundleID>' (one app), or an input device name/UID.") var source: String = "hub"
     @Option(name: .shortAndLong, help: "Seconds to record.") var seconds: Double = 5
     @Option(name: .long, help: "Output WAV path (default: ~/Music/Pancake/…).") var to: String?
 
@@ -167,6 +167,12 @@ struct Record: ParsableCommand {
         if source.lowercased() == "hub" {
             graph.upsert(.hub)
             srcID = Graph.hubID
+            srcChannels = 2
+        } else if source.hasPrefix("tap:") {
+            let bundleID = String(source.dropFirst("tap:".count))
+            let n = Node.tap(bundleID)
+            graph.upsert(n)
+            srcID = n.id
             srcChannels = 2
         } else {
             guard let d = AudioDevice.find(nameOrUID: source), d.hasInput else { throw ValidationError("no input device matches '\(source)'") }

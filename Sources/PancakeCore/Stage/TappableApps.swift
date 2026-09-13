@@ -25,15 +25,27 @@ public func tappableApps() -> [TappableApp] {
             byBundle[p.bundleID] = p
         }
     }
+    let bundles = Array(byBundle.keys)
+    // A helper (`com.app.helper`, `.helper.GPU`, …) is captured as part of its parent app's family
+    // tap, so don't surface it as its own row — list only the top-level app the user recognises.
+    func isHelperOfListed(_ bid: String) -> Bool {
+        bundles.contains { $0 != bid && bid.hasPrefix($0 + ".") }
+    }
+    // The app is "playing" if it *or any of its helpers* is producing output (Chromium/Electron apps
+    // play through a helper), so the ● indicator is right for browsers, Discord, Slack.
+    func familyPlaying(_ bid: String) -> Bool {
+        byBundle.contains { k, v in (k == bid || k.hasPrefix(bid + ".")) && v.isRunningOutput }
+    }
     let running = NSWorkspace.shared.runningApplications
     var out: [TappableApp] = []
-    for (bid, proc) in byBundle {
+    for (bid, _) in byBundle where !isHelperOfListed(bid) {
         let apps = running.filter { $0.bundleIdentifier == bid }
         let regular = apps.first { $0.activationPolicy == .regular }
+        let playing = familyPlaying(bid)
         // Skip background daemons/helpers that aren't actually playing anything.
-        guard regular != nil || proc.isRunningOutput else { continue }
+        guard regular != nil || playing else { continue }
         let name = regular?.localizedName ?? apps.first?.localizedName ?? bid
-        out.append(TappableApp(bundleID: bid, name: name, isRunningOutput: proc.isRunningOutput))
+        out.append(TappableApp(bundleID: bid, name: name, isRunningOutput: playing))
     }
     return out.sorted {
         if $0.isRunningOutput != $1.isRunningOutput { return $0.isRunningOutput }   // playing first

@@ -42,20 +42,26 @@ public final class ProcessTap {
         }
     }
 
-    /// The process object for a bundle id, preferring one that's currently producing output (some
-    /// apps register several helper processes under one bundle id).
-    public static func processObject(forBundleID bundleID: String) -> AudioObjectID? {
-        let matches = processes().filter { $0.bundleID == bundleID }
-        return (matches.first { $0.isRunningOutput } ?? matches.first)?.id
+    /// Every process object in an app's bundle-id *family*: the main process plus its helpers
+    /// (`<bundle>.helper`, `.helper.GPU`, `.helper.Renderer`, …). This matters because Chromium- and
+    /// Electron-based apps — browsers (Helium, Chrome), Discord, Slack — render their audio in a
+    /// helper process, not the main one, so a tap on the main bundle id alone captures silence.
+    public static func processObjects(forBundleID bundleID: String) -> [AudioObjectID] {
+        let prefix = bundleID + "."
+        return processes()
+            .filter { $0.bundleID == bundleID || $0.bundleID.hasPrefix(prefix) }
+            .map(\.id)
     }
 
     // MARK: Creation
 
-    /// Create a stereo tap on the app with this bundle id. Returns nil if the app isn't currently
-    /// a HAL process (not running / not producing audio) or the tap can't be made.
+    /// Create a stereo tap on the app with this bundle id — a mixdown of its whole process family, so
+    /// the audio-producing helper is included. Returns nil if none of the family is a HAL process
+    /// (app not running) or the tap can't be made.
     public static func create(bundleID: String, name: String) -> ProcessTap? {
-        guard let proc = processObject(forBundleID: bundleID) else { return nil }
-        let desc = CATapDescription(stereoMixdownOfProcesses: [proc])
+        let family = processObjects(forBundleID: bundleID)
+        guard !family.isEmpty else { return nil }
+        let desc = CATapDescription(stereoMixdownOfProcesses: family)
         desc.name = name
         desc.isPrivate = true
         desc.muteBehavior = .unmuted

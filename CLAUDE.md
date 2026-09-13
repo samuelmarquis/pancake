@@ -36,7 +36,7 @@ make stage && make run-stage  # build/PancakeStage.app (faceless screen-share he
 tail -f ~/Library/Logs/pancake.log
 .build/debug/pancake status | devices [--all] | graph | set-output <name>
 .build/debug/pancake run [--output <name>] [--hub <name>] [--no-pin] [--no-follow] [--stats N] [--verbose]
-.build/debug/pancake record [--source hub|<device>] [--seconds N] [--to <path>]   # proves the recorder path
+.build/debug/pancake record [--source hub|tap:<bundleID>|<device>] [--seconds N] [--to <path>]   # proves the recorder/tap path
 .build/debug/pancake probe-aggregate <dev>... [--main <dev>] [--run N]
 ```
 
@@ -146,6 +146,13 @@ because the ring lives in the context, not the matrix.
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
   just makes everything quiet (found at 0.5). `swift tools/setvol.swift AA-BB-CC-DD-EE-FF:output 1.0`
   is the manual fix; the engine should hold the routed device at unity — see next steps.
+- **Process taps capture the whole bundle-id family, verified live (2026-09-13).** Chromium/Electron
+  apps (Helium and other browsers, Discord, Slack) render audio in a *helper* process
+  (`net.imput.helium.helper`, `com.hnc.Discord.helper.Renderer`), not the main bundle — so tapping just
+  the main process object captured silence. `ProcessTap.create` now taps a stereo mixdown of the whole
+  family (`<bundle>` + `<bundle>.*`), and `tappableApps()` hides helpers whose parent app is listed (and
+  the ● "playing" dot reflects any family member). Proven: `pancake record --source tap:com.hnc.Discord`
+  captured Discord at −2.4 dBFS while its audio came from `…helper.Renderer` (old code → silence).
 - **Recorder, verified live (2026-09-12).** `pancake record --seconds 6` of the hub while a sound
   played wrote a valid 2ch/48k/24-bit WAV, 6.005 s, peak −28.9 dBFS. The RT ring is also covered by a
   sample-exact unit test (`RecorderRingTests`) that pumps known audio through `pk_ioproc` and reads it

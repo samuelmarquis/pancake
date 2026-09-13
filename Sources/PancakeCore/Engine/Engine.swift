@@ -579,7 +579,7 @@ public final class Engine {
         }
         var ordered: [(bundleID: String, tap: ProcessTap)] = []
         for bundleID in wanted where !ordered.contains(where: { $0.bundleID == bundleID }) {
-            if let existing = taps[bundleID], ProcessTap.processObject(forBundleID: bundleID) != nil {
+            if let existing = taps[bundleID], !ProcessTap.processObjects(forBundleID: bundleID).isEmpty {
                 ordered.append((bundleID, existing)); continue
             }
             if let stale = taps[bundleID] { stale.destroy(); taps[bundleID] = nil }
