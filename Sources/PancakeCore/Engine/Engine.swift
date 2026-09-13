@@ -44,6 +44,11 @@ public final class Engine {
         public var signalThreshold: Float = 0.001
         /// HAL events arrive in bursts; coalesce them.
         public var rebuildDebounce: TimeInterval = 0.35
+        /// …but never let a continuous burst postpone a rebuild forever. After a coreaudiod restart the
+        /// process list can change every ~150 ms for a minute; a pure debounce starved the rebuild the
+        /// whole time (seen 2026-09-13). A pending default-debounce rebuild fires at most this long
+        /// after it was first requested.
+        public var rebuildMaxLatency: TimeInterval = 2
         /// A Bluetooth device that has just appeared needs a moment before its audio link is
         /// usable; building an aggregate on it too early has left it running-but-silent.
         public var bluetoothSettleDelay: TimeInterval = 2.5
@@ -261,6 +266,27 @@ public final class Engine {
         return s
     }
 
+    // MARK: - Snapshot for the UI (any thread, never waits on `queue`)
+
+    /// What the UI polls — bus meters, recording state, coreaudiod health — mirrored under a lock so a
+    /// read never has to wait for `queue`. `queue` can be stuck for seconds inside a HAL call when
+    /// coreaudiod is overloaded; a UI that `queue.sync`s from the main thread then freezes with it
+    /// (seen 2026-09-13). Written on `queue` whenever the underlying state changes; the lock is never
+    /// held across a HAL call. The meters themselves are atomics in the C context.
+    private final class Snapshot {
+        let lock = NSLock()
+        var busSlots: [NodeID: Int] = [:]
+        var recordingSlots: [NodeID: Int] = [:]
+        var sampleRate: Double = 0
+        var plugInDuplicates: [String: Int] = [:]
+    }
+    private let snapshot = Snapshot()
+    private func updateSnapshot(_ body: (Snapshot) -> Void) { snapshot.lock.lock(); body(snapshot); snapshot.lock.unlock() }
+    private func readSnapshot<T>(_ body: (Snapshot) -> T) -> T { snapshot.lock.lock(); defer { snapshot.lock.unlock() }; return body(snapshot) }
+
+    /// HAL plug-ins coreaudiod has registered more than once (see `HALHealth`), as of the last rebuild.
+    public var plugInDuplicates: [String: Int] { readSnapshot { $0.plugInDuplicates } }
+
     // MARK: - Recording (queue only)
 
     /// Begin recording everything wired into a `.recorder` node to `url` (a WAV). The node must be
@@ -273,6 +299,7 @@ public final class Engine {
             let session = try RecordingSession(rt: rt, slot: UInt32(slot), url: url, sampleRate: info.sampleRate)
             pk_recorder_start(rt, UInt32(slot))
             recordings[node] = session
+            updateSnapshot { $0.recordingSlots[node] = slot }
             ensureDrainTimer()
             Log.info("recording \(node) → \(url.path) (slot \(slot), \(Int(info.sampleRate))Hz)")
         }
@@ -280,15 +307,15 @@ public final class Engine {
 
     public func stopRecording(_ node: NodeID) { queue.sync { stopRecordingLocked(node) } }
 
-    public func isRecording(_ node: NodeID) -> Bool { queue.sync { recordings[node] != nil } }
+    /// Polled by the UI: reads the snapshot, never waits on `queue`.
+    public func isRecording(_ node: NodeID) -> Bool { readSnapshot { $0.recordingSlots[node] != nil } }
 
-    /// Seconds captured so far on a node's recording (from the IOProc frame count), or nil.
+    /// Seconds captured so far on a node's recording (from the IOProc frame count), or nil. Polled by
+    /// the UI: reads the snapshot and an atomic, never waits on `queue`.
     public func recordingElapsed(_ node: NodeID) -> Double? {
-        queue.sync {
-            guard recordings[node] != nil, let slot = recorderSlots[node],
-                  case .running(let info) = currentState, info.sampleRate > 0 else { return nil }
-            return Double(pk_recorder_captured_frames(rt, UInt32(slot))) / info.sampleRate
-        }
+        let (slot, rate) = readSnapshot { ($0.recordingSlots[node], $0.sampleRate) }
+        guard let slot, rate > 0 else { return nil }
+        return Double(pk_recorder_captured_frames(rt, UInt32(slot))) / rate
     }
 
     private func stopRecordingLocked(_ node: NodeID) {
@@ -296,6 +323,7 @@ public final class Engine {
         if let slot = recorderSlots[node] { pk_recorder_stop(rt, UInt32(slot)) }
         session.close()
         recordings[node] = nil
+        updateSnapshot { $0.recordingSlots[node] = nil }
         Log.info("stopped recording \(node) → \(session.url.path) (\(session.framesWritten) frames)")
         if recordings.isEmpty { recordDrainTimer?.cancel(); recordDrainTimer = nil }
     }
@@ -347,16 +375,16 @@ public final class Engine {
             used.insert(free)
         }
         busSlots = map
+        updateSnapshot { $0.busSlots = map }
         return map
     }
 
     /// The most gain reduction (dB, ≤ 0) a bus's compressor applied last cycle, and its post-processing
-    /// peak (0…1) — for the node's meter. Zero if the bus isn't running.
+    /// peak (0…1) — for the node's meter. Zero if the bus isn't running. Polled ~10×/s by the UI, so it
+    /// reads the snapshot and the C atomics and never waits on `queue`.
     public func busMeter(_ node: NodeID) -> (gainReduction: Float, peak: Float) {
-        queue.sync {
-            guard let slot = busSlots[node] else { return (0, 0) }
-            return (pk_bus_gain_reduction_db(rt, UInt32(slot)), pk_bus_peak(rt, UInt32(slot)))
-        }
+        guard let slot = readSnapshot({ $0.busSlots[node] }) else { return (0, 0) }
+        return (pk_bus_gain_reduction_db(rt, UInt32(slot)), pk_bus_peak(rt, UInt32(slot)))
     }
 
     private func ensureDrainTimer() {
@@ -404,6 +432,9 @@ public final class Engine {
     /// Bundle ids the last rebuild wanted a tap for (whether or not the app was running then), so a
     /// later launch of one of them is recognised as "now tappable — rebuild".
     private var wantedTapBundleIDs: [String] = []
+    /// Bundle ids a queued rebuild will (re)create taps for — de-duplicates bursts of process-list events.
+    private var tapRebuildPendingFor: Set<String> = []
+    private var lastPlugInDuplicates: [String: Int] = [:]
     /// Recorder node id → its pk_context recorder slot, (re)assigned whenever the matrix compiles.
     private var recorderSlots: [NodeID: Int] = [:]
     /// Bus node id → its pk_context bus slot, likewise. Stable across compiles so the compressor's
@@ -426,19 +457,40 @@ public final class Engine {
 
     private func setState(_ s: State) {
         currentState = s
+        let rate: Double = { if case .running(let info) = s { return info.sampleRate } else { return 0 } }()
+        updateSnapshot { $0.sampleRate = rate }
         onStateChange?(s)
     }
 
+    /// When the current rebuild-coalescing window started (the first request not yet served).
+    private var pendingRebuildSince: Date?
+
+    /// Seconds until a coalesced rebuild should fire. A default-debounce request waits `requested`
+    /// but never past `windowStart + maxLatency`, so a continuous stream of requests can't starve it.
+    /// An explicit delay (a Bluetooth device settling) is a hard minimum and is honoured as-is.
+    static func rebuildFireDelay(sinceWindowStart elapsed: Double, requested: Double, explicit: Bool,
+                                 maxLatency: Double) -> Double {
+        if explicit { return requested }
+        return max(0, min(requested, max(requested, maxLatency) - elapsed))
+    }
+
     private func scheduleRebuild(reason: String, delay: TimeInterval? = nil) {
+        let now = Date()
         pendingRebuild?.cancel()
+        // An explicit delay restarts the window (its minimum must not be cut short by an older request).
+        if pendingRebuild == nil || delay != nil { pendingRebuildSince = now }
+        let fireIn = Self.rebuildFireDelay(sinceWindowStart: now.timeIntervalSince(pendingRebuildSince ?? now),
+                                           requested: delay ?? configuration.rebuildDebounce, explicit: delay != nil,
+                                           maxLatency: configuration.rebuildMaxLatency)
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingRebuild = nil
+            self.pendingRebuildSince = nil
             Log.info("rebuild: \(reason)")
             self.rebuild()
         }
         pendingRebuild = item
-        queue.asyncAfter(deadline: .now() + (delay ?? configuration.rebuildDebounce), execute: item)
+        queue.asyncAfter(deadline: .now() + fireIn, execute: item)
     }
 
     // MARK: HAL events
@@ -479,6 +531,16 @@ public final class Engine {
 
         case .processListChanged:
             reconcileTapProcesses()
+
+        case .serviceRestarted:
+            // Every object ID we hold is dead. Forget the taps outright — asking the HAL to update or
+            // destroy them only produces refusals (and, before this, a loop of failed re-creates while
+            // coreaudiod was still coming up). The rebuild tears down the dead aggregate, creates fresh
+            // taps once the processes are listed again, and re-checks coreaudiod's plug-in health —
+            // a restart is exactly when duplicate registrations multiply.
+            Log.warn("coreaudiod restarted; dropping \(taps.count) dead tap(s) and rebuilding")
+            taps.removeAll()
+            scheduleRebuild(reason: "coreaudiod restarted")
         }
     }
 
@@ -642,6 +704,12 @@ public final class Engine {
     /// holding the tap notices. If the HAL won't take the update, replace the tap (new UUID — the
     /// caller must then rebuild the aggregate). Returns nil only if neither worked.
     private func retarget(_ tap: ProcessTap) -> ProcessTap? {
+        // A tap from before a coreaudiod restart is a dead ID: don't ask the HAL to update or destroy
+        // it (it refuses), just let the caller create a fresh one.
+        guard tap.isAlive else {
+            Log.info("tap \(tap.bundleID): tap object is gone (coreaudiod restarted?); will recreate")
+            return nil
+        }
         let family = ProcessTap.processObjects(forBundleID: tap.bundleID)
         guard !family.isEmpty, family != tap.processObjects else { return tap }   // app gone (keep, silent) or unchanged
         if tap.update(processObjects: family) {
@@ -671,10 +739,28 @@ public final class Engine {
             }
         }
         for bundleID in wantedTapBundleIDs where taps[bundleID] == nil && !ProcessTap.processObjects(forBundleID: bundleID).isEmpty {
-            Log.info("tap \(bundleID): app is now running")
             needRebuild.append(bundleID)
         }
-        if !needRebuild.isEmpty { scheduleRebuild(reason: "taps changed (\(needRebuild.sorted()))") }
+        guard !needRebuild.isEmpty else { return }
+        // Already queued for exactly these taps: the rebuild's max latency guarantees it runs, so don't
+        // re-log or push it back on every one of a burst of process-list changes.
+        let wanted = Set(needRebuild)
+        if pendingRebuild != nil, wanted.isSubset(of: tapRebuildPendingFor) { return }
+        tapRebuildPendingFor.formUnion(wanted)
+        Log.info("taps changed (\(needRebuild.sorted())); rebuilding")
+        scheduleRebuild(reason: "taps changed (\(needRebuild.sorted()))")
+    }
+
+    /// Log (once per change) if coreaudiod has plug-ins registered more than once — the AirPlayXPCHelper
+    /// leak that doubles on every coreaudiod restart and eventually pins the CPU. Not pancake's state,
+    /// but pancake's driver installs are what restart coreaudiod, so it's pancake's job to notice.
+    private func checkHALHealth() {
+        let dupes = HALHealth.duplicatePlugIns()
+        guard dupes != lastPlugInDuplicates else { return }
+        lastPlugInDuplicates = dupes
+        updateSnapshot { $0.plugInDuplicates = dupes }
+        if let msg = HALHealth.describe(dupes) { Log.warn(msg) }
+        else { Log.info("coreaudiod plug-in registrations are back to normal (no duplicates)") }
     }
 
     private func destroyAllTaps() {
@@ -756,6 +842,8 @@ public final class Engine {
     }
 
     private func rebuild(force: Bool = false) {
+        tapRebuildPendingFor.removeAll()
+        checkHALHealth()
         let devices = AudioDevice.all(includeHidden: true)
         knownDeviceUIDs = relevantDeviceUIDs(devices)
         guard let hub = devices.first(where: { $0.uid == configuration.hubUID }) else {

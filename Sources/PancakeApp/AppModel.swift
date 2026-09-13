@@ -46,7 +46,12 @@ final class AppModel: ObservableObject {
     // Pancake Stage (clean Discord screen-share). It has no configuration: the menu launches and quits
     // the process, and *what* it shares is whatever the graph wires into the Pancake Program node.
     @Published private(set) var stageRunning = false
-    @Published private(set) var stageApps: [TappableApp] = []
+    /// Apps that can be tapped (the graph palette), refreshed off the main thread on launch/quit and
+    /// whenever the HAL's process list changes.
+    @Published private(set) var tapCandidates: [TappableApp] = []
+    /// Set when coreaudiod itself is unhealthy in a way pancake can see (duplicate plug-in
+    /// registrations — see `HALHealth`). Shown in the menu with the fix.
+    @Published private(set) var coreAudioWarning: String?
     static let stageBundleID = "com.pancake.stage"
 
     /// Whether the app is registered to launch at login (SMAppService).
@@ -61,8 +66,19 @@ final class AppModel: ObservableObject {
     private var monitor: HardwareMonitor?
     private var watcher: FileWatcher?
     private var workspaceObservers: [NSObjectProtocol] = []
-    /// Listeners on Pancake's volume/mute so the slider tracks the hardware keys live.
-    private var hubVolumeListeners: [PropertyListener] = []
+    /// Everything that talks to the HAL on the app's behalf lives on `queue`, never the main thread.
+    /// When coreaudiod is overloaded a single property read can take seconds; done on the main thread
+    /// that froze the menu and the graph window with it (2026-09-13). This holds the `queue`-only state.
+    private final class HALWork: @unchecked Sendable {
+        /// Listeners on Pancake's volume/mute so the slider tracks the hardware keys live.
+        var hubVolumeListeners: [PropertyListener] = []
+        /// Coalescing: a burst of HAL events runs each refresh at most once more after the current one.
+        var devicesBusy = false, devicesAgain = false
+        var appsBusy = false, appsAgain = false
+        /// Latest slider value not yet written (a drag produces far more values than the HAL needs).
+        var pendingVolume: Float32?
+    }
+    private let hal = HALWork()
 
     private init() {
         Log.logToFile()
@@ -76,15 +92,23 @@ final class AppModel: ObservableObject {
         graph = loaded
         engine = Engine(graph: loaded)
 
+        let engineRef = engine
         engine.onStateChange = { [weak self] s in
-            Task { @MainActor in self?.state = s }
+            let warning = HALHealth.describe(engineRef.plugInDuplicates)   // snapshot read, never waits
+            Task { @MainActor in
+                self?.state = s
+                if self?.coreAudioWarning != warning { self?.coreAudioWarning = warning }
+            }
         }
         syncFromGraph()
         refreshDevices()
 
         monitor = try? HardwareMonitor(queue: queue) { [weak self] event in
-            guard event == .devicesChanged else { return }
-            Task { @MainActor in self?.refreshDevices() }
+            switch event {
+            case .devicesChanged, .serviceRestarted: Task { @MainActor in self?.refreshDevices() }
+            case .processListChanged: Task { @MainActor in self?.refreshTapCandidates() }
+            default: break
+            }
         }
 
         let store = self.store
@@ -242,7 +266,7 @@ final class AppModel: ObservableObject {
             guard let n = graph.node(id) else { return nil }
             switch n.kind {
             case .hub: return "Pancake"
-            case .tap(let b): return n.label ?? stageApps.first { $0.bundleID == b }?.name ?? b
+            case .tap(let b): return n.label ?? tapCandidates.first { $0.bundleID == b }?.name ?? b
             default: return n.label ?? id.rawValue
             }
         }
@@ -311,7 +335,22 @@ final class AppModel: ObservableObject {
 
     private func refreshStageState() {
         stageRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.stageBundleID }
-        stageApps = tappableApps()
+        refreshTapCandidates()
+    }
+
+    /// Re-list tappable apps on `queue` (it reads every HAL process object) and publish the result.
+    private func refreshTapCandidates() {
+        let hal = self.hal
+        queue.async { [weak self] in
+            if hal.appsBusy { hal.appsAgain = true; return }
+            hal.appsBusy = true
+            repeat {
+                hal.appsAgain = false
+                let apps = tappableApps()
+                Task { @MainActor in if self?.tapCandidates != apps { self?.tapCandidates = apps } }
+            } while hal.appsAgain
+            hal.appsBusy = false
+        }
     }
 
     // MARK: Launch at login
@@ -350,17 +389,28 @@ final class AppModel: ObservableObject {
         Log.info("menu: input lock \(lockInput ? "on" : "off")")
     }
 
-    /// Drive Pancake's own output volume (what the volume keys move).
+    /// Drive Pancake's own output volume (what the volume keys move). The UI updates at once; the HAL
+    /// write happens on `queue`, latest value wins.
     func setHubVolume(_ v: Double) {
         hubVolume = v
-        try? AudioDevice.find(uid: engine.configuration.hubUID)?.setOutputVolumeScalar(Float32(v))
+        let hal = self.hal, hubUID = engine.configuration.hubUID, queue = self.queue
+        queue.async {
+            let writerQueued = hal.pendingVolume != nil
+            hal.pendingVolume = Float32(v)
+            guard !writerQueued else { return }   // the queued writer will pick up this newer value
+            queue.async {
+                guard let value = hal.pendingVolume else { return }
+                hal.pendingVolume = nil
+                try? AudioDevice.find(uid: hubUID)?.setOutputVolumeScalar(value)
+            }
+        }
     }
 
     func toggleMute() {
-        guard let hub = AudioDevice.find(uid: engine.configuration.hubUID) else { return }
-        let newMuted = !(hub.outputMuted ?? false)
-        try? hub.setOutputMuted(newMuted)
+        let newMuted = !hubMuted
         hubMuted = newMuted
+        let hubUID = engine.configuration.hubUID
+        queue.async { try? AudioDevice.find(uid: hubUID)?.setOutputMuted(newMuted) }
     }
 
     private func save() {
@@ -510,20 +560,43 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(Log.defaultFileURL)
     }
 
-    func shutdown() {
+    /// Stop the engine (tear down the aggregate, hand the default output back). Blocks until the engine
+    /// is done — which can be forever if coreaudiod isn't answering, so the app delegate runs this off the
+    /// main thread with a deadline. Returned as a closure so it can be called from any thread.
+    func shutdownWork() -> () -> Void {
         Log.info("pancake app quitting")
-        engine.stop()
+        let engine = self.engine
+        return { engine.stop() }
     }
 
     // MARK: Reacting to the world
 
+    /// Re-read the device lists and re-arm the Pancake volume listeners, on `queue`, and publish the
+    /// result. Coalesced: a burst of devices-changed events runs it at most once more.
     private func refreshDevices() {
-        let all = AudioDevice.all()
-        outputs = all.filter { $0.hasOutput && !$0.isSoftware }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        inputs = all.filter { $0.hasInput && !$0.isSoftware }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        installHubVolumeListeners()
+        let hal = self.hal, hubUID = engine.configuration.hubUID, queue = self.queue
+        queue.async { [weak self] in
+            if hal.devicesBusy { hal.devicesAgain = true; return }
+            hal.devicesBusy = true
+            repeat {
+                hal.devicesAgain = false
+                let all = AudioDevice.all()
+                let outs = all.filter { $0.hasOutput && !$0.isSoftware }
+                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                let ins = all.filter { $0.hasInput && !$0.isSoftware }
+                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                let volume = Self.installHubVolumeListeners(hal: hal, hubUID: hubUID, queue: queue) { v, m in
+                    Task { @MainActor in self?.applyHubVolume(v, muted: m) }
+                }
+                Task { @MainActor in
+                    guard let self else { return }
+                    if self.outputs != outs { self.outputs = outs }
+                    if self.inputs != ins { self.inputs = ins }
+                    if let volume { self.applyHubVolume(volume.0, muted: volume.1) }
+                }
+            } while hal.devicesAgain
+            hal.devicesBusy = false
+        }
     }
 
     private func graphFileChanged(_ g: Graph) {
@@ -546,28 +619,31 @@ final class AppModel: ObservableObject {
 
     // MARK: Pancake volume, tracked live so the slider follows the volume keys
 
-    private func installHubVolumeListeners() {
-        hubVolumeListeners.forEach { $0.remove() }
-        hubVolumeListeners = []
-        guard let hub = AudioDevice.find(uid: engine.configuration.hubUID) else { return }
-        refreshVolume(from: hub)
+    /// On `queue`: re-arm listeners on Pancake's volume/mute (they fire on `queue` and read there) and
+    /// return the current (volume, muted). `publish` delivers later changes.
+    private nonisolated static func installHubVolumeListeners(hal: HALWork, hubUID: String, queue: DispatchQueue,
+                                                              publish: @escaping (Float32?, Bool) -> Void) -> (Float32?, Bool)? {
+        hal.hubVolumeListeners.forEach { $0.remove() }
+        hal.hubVolumeListeners = []
+        guard let hub = AudioDevice.find(uid: hubUID) else { return nil }
         let hubID = hub.id
         var addresses = hub.outputVolumes().keys.sorted().map {
             AudioObjectPropertyAddress(kAudioDevicePropertyVolumeScalar, scope: kAudioDevicePropertyScopeOutput, element: $0)
         }
         addresses.append(AudioObjectPropertyAddress(kAudioDevicePropertyMute, scope: kAudioDevicePropertyScopeOutput, element: kAudioObjectPropertyElementMain))
         for address in addresses {
-            if let l = try? hubID.addPropertyListener(address, queue: queue, handler: { [weak self] in
+            if let l = try? hubID.addPropertyListener(address, queue: queue, handler: {
                 guard let dev = try? AudioDevice(id: hubID) else { return }
-                Task { @MainActor in self?.refreshVolume(from: dev) }
+                publish(dev.outputVolumeScalar, dev.outputMuted ?? false)
             }) {
-                hubVolumeListeners.append(l)
+                hal.hubVolumeListeners.append(l)
             }
         }
+        return (hub.outputVolumeScalar, hub.outputMuted ?? false)
     }
 
-    private func refreshVolume(from hub: AudioDevice) {
-        if let v = hub.outputVolumeScalar, abs(Double(v) - hubVolume) > 0.001 { hubVolume = Double(v) }
-        hubMuted = hub.outputMuted ?? false
+    private func applyHubVolume(_ v: Float32?, muted: Bool) {
+        if let v, abs(Double(v) - hubVolume) > 0.001 { hubVolume = Double(v) }
+        if hubMuted != muted { hubMuted = muted }
     }
 }

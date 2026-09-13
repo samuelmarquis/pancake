@@ -11,6 +11,9 @@ public final class HardwareMonitor {
         /// The HAL's set of audio-producing processes changed: an app (or one of its helpers)
         /// launched or quit. What process taps key on.
         case processListChanged
+        /// coreaudiod restarted (a driver install, a crash, `killall coreaudiod`). Every AudioObjectID
+        /// we hold — our aggregate, our process taps — now refers to nothing.
+        case serviceRestarted
 
         public var description: String {
             switch self {
@@ -19,6 +22,7 @@ public final class HardwareMonitor {
             case .defaultSystemOutputChanged: return "default system output changed"
             case .defaultInputChanged: return "default input changed"
             case .processListChanged: return "process list changed"
+            case .serviceRestarted: return "coreaudiod restarted"
             }
         }
     }
@@ -32,6 +36,7 @@ public final class HardwareMonitor {
             (kAudioHardwarePropertyDefaultSystemOutputDevice, .defaultSystemOutputChanged),
             (kAudioHardwarePropertyDefaultInputDevice, .defaultInputChanged),
             (kAudioHardwarePropertyProcessObjectList, .processListChanged),
+            (kAudioHardwarePropertyServiceRestarted, .serviceRestarted),
         ]
         for (selector, event) in subscriptions {
             listeners.append(try systemAudioObject.addPropertyListener(.init(selector), queue: queue) { handler(event) })

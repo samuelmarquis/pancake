@@ -52,8 +52,19 @@ uninstall:
 	$(MAKE) restart-coreaudiod
 
 # launchctl kickstart on coreaudiod is blocked by SIP; killing it works, launchd respawns it.
+#
+# AirPlayXPCHelper is restarted *with* coreaudiod, in the same signal. It hosts Apple's AirPlay HAL
+# plug-in and, every time coreaudiod comes back, re-registers every plug-in instance it already holds
+# plus a new one — so its registration count doubles per coreaudiod restart (measured 2026-09-13:
+# 16 → 32 on one restart). Over weeks of driver installs that reaches millions, every device-list query
+# in coreaudiod walks them all, and coreaudiod pins the CPU for the whole machine. Killing both together
+# lets the fresh helper register exactly once with the fresh coreaudiod (verified: 32 → 1). launchd
+# respawns both. killall still signals the names it finds when one isn't running (exits 1), so the
+# names are chosen up front rather than letting a failed killall fall through to a SIGKILL of the
+# *new* coreaudiod.
 restart-coreaudiod:
-	killall coreaudiod || killall -9 coreaudiod || true
+	@if pgrep -x AirPlayXPCHelper >/dev/null; then names="AirPlayXPCHelper coreaudiod"; else names="coreaudiod"; fi; \
+	 echo "killall $$names"; killall $$names || killall -9 coreaudiod || true
 	@sleep 2
 	@pgrep -q coreaudiod && echo "coreaudiod restarted (pid $$(pgrep coreaudiod))" || echo "WARNING: coreaudiod not running"
 

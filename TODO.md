@@ -11,6 +11,23 @@ the links (a change hot-swaps the matrix like a gain), and a mid-canvas card wit
 toggle, live gain-reduction meter and a settings popover. See CLAUDE.md § Buses. What's *not* done:
 an EQ (same shape as the compressor — a biquad or two per bus channel, in-cycle) if anyone wants it.
 
+## Pancake left as the system default output with no engine — open
+
+macOS keeps a ranked preferred-output list. pancake pins Pancake as the default all day, so Pancake
+ranks first; if the real default disappears while pancake *isn't running* (AirPods walk away after a
+crash or force-quit), macOS falls back to Pancake and nothing is audible. Quit hands the default back,
+and quit can no longer hang (bounded at 4 s), but a crash or `kill -9` still leaves it. Options, none
+built yet:
+
+- **Driver-side (principled):** report `kAudioDevicePropertyDeviceCanBeDefaultDevice` true only while a
+  client is reading Pancake (the engine's aggregate), with a few seconds of hysteresis so a rebuild's
+  brief IO gap doesn't bounce the default, and notify the property change so coreaudiod re-evaluates.
+  Needs measuring: does macOS actually move the default when it goes false? Does the hysteresis stop
+  flapping (a notification storm is exactly what we must not create)?
+- **App-side (partial):** on launch, if the default output is Pancake but the graph's hub output is a
+  present physical device, that's the stale case — nothing to fix then, but log it; and keep the
+  hand-back on every exit path we control (SIGTERM handler).
+
 ## Plugin (AU / VST3 / CLAP) inserts — declined for now; blast radius mapped
 
 Still declined, but here's the anatomy so a future leg starts from analysis, not a cold read. Verdict:

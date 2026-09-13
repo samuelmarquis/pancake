@@ -60,6 +60,15 @@ struct Status: ParsableCommand {
         if hub != nil, others.count < 3 {
             print("                       (missing \(3 - others.count) device(s) — the installed driver is older than this build; sudo make install-driver)")
         }
+        let plugIns = HALHealth.plugInBundleIDs()
+        let dupes = HALHealth.duplicatePlugIns(in: plugIns)
+        if dupes.isEmpty {
+            print("coreaudiod plug-ins:   \(plugIns.count) registered, no duplicates")
+        } else {
+            print("coreaudiod plug-ins:   \(plugIns.count) registered — WARNING: " +
+                  dupes.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: ", "))
+            print("                       each coreaudiod restart doubles these; reset with: \(HALHealth.resetCommand)")
+        }
         print("graph file:            \(config.store.url.path) \(FileManager.default.fileExists(atPath: config.store.url.path) ? "" : "(missing)")")
         if let g = try? config.store.load() {
             print("graph outputs:         \(g.hubOutputDeviceUIDs)")

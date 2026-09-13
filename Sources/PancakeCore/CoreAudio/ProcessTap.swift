@@ -41,6 +41,12 @@ public final class ProcessTap {
 
     public func destroy() { AudioHardwareDestroyProcessTap(tapID) }
 
+    /// Whether the HAL still knows this tap. False after a coreaudiod restart: the ID then refers to
+    /// nothing (or, worse, to something else), so it's checked by UID, not just by a successful read.
+    public var isAlive: Bool {
+        (try? tapID.getPropertyString(.init(kAudioTapPropertyUID))) == uuid
+    }
+
     // MARK: Process enumeration
 
     /// Every process object the HAL lists that carries a bundle id.

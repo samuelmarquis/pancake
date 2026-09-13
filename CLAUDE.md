@@ -29,7 +29,7 @@ thing.*
 make build                 # → .build/debug/pancake
 make test                  # swift test with the -F flags CLT needs for swift-testing
 make driver                # driver/build/Pancake.driver
-sudo make install-driver   # needs a real terminal for the password; kills coreaudiod (launchd respawns it — kickstart is SIP-blocked)
+sudo make install-driver   # needs a real terminal for the password; kills coreaudiod *and* AirPlayXPCHelper (launchd respawns both — see below)
 make app && make run-app   # build/Pancake.app; `make stop-app` quits it via AppleScript (SIGTERM would skip the hand-back)
 make install-app           # copy both apps → ~/Applications (stable paths); then menu → "Start at login"
 make stage && make run-stage  # build/PancakeStage.app (faceless screen-share helper); `make stop-stage` quits it
@@ -38,6 +38,7 @@ tail -f ~/Library/Logs/pancake.log
 .build/debug/pancake run [--output <name>] [--hub <name>] [--no-pin] [--no-follow] [--stats N] [--verbose]
 .build/debug/pancake record [--source hub|tap:<bundleID>|<device>] [--seconds N] [--to <path>]   # proves the recorder/tap path
 .build/debug/pancake probe-aggregate <dev>... [--main <dev>] [--run N]
+sudo tools/storm-snapshot.sh  # coreaudiod misbehaving? capture everything first (→ ~/Desktop/pancake-storm-*)
 ```
 
 `swift test` without the flags fails with "no such module 'Testing'". Test files must not
@@ -95,9 +96,20 @@ the ring absorbs disk jitter. Up to `PK_MAX_RECORDERS` (4) stereo recorders. The
 recorder node a slot at every matrix compile (`syncRecorderSlots`); recordings survive a rebuild
 because the ring lives in the context, not the matrix.
 
+**Never restart coreaudiod on its own — restart AirPlayXPCHelper with it.** Apple's AirPlayXPCHelper
+re-registers every HAL plug-in instance it holds whenever coreaudiod comes back, so its registration
+count *doubles* per coreaudiod restart (measured 16 → 32; `sudo killall AirPlayXPCHelper coreaudiod`
+→ 1). Weeks of driver installs grew it until coreaudiod pinned the CPU for the whole machine
+(2026-09-13, write-up in `COREAUDIOD-STORM.md`). `make install-driver` now kills both in one `killall`.
+`pancake status` shows duplicate plug-in registrations, the engine logs them, the menu warns. If you
+ever need to bounce coreaudiod by hand, use the two-name `killall`.
+
 ## Invariants — don't break these
 
 1. **All engine state mutates on `Engine.queue`.** HAL listeners, file watcher, public API — all hop onto it.
+   **But the UI never waits on it**: anything the UI polls comes from the engine's lock-protected
+   `Snapshot`, and the app does its own HAL work on its background queue, not the main thread —
+   coreaudiod can stall a single HAL call for seconds, and a main thread waiting on it freezes the app.
 2. **Nothing in the program writes a gain.** Links default to unity; only the user changes them. The
    driver's Pancake volume is the user's (volume keys). The one exception, and it's deliberate: the
    engine holds the *routed* physical output's hardware volume at unity while it's the output (the phone

@@ -714,7 +714,7 @@ private func addNodeItems(app: AppModel, editor: GraphEditorModel, atCursor: Boo
     let outs = app.outputs.filter { !existing.contains($0.uid) }
     let ins = app.inputs.filter { !existing.contains($0.uid) }
     let existingTaps = Set(app.graph.micTapBundleIDs)
-    let apps = tappableApps().filter { !existingTaps.contains($0.bundleID) }
+    let apps = app.tapCandidates.filter { !existingTaps.contains($0.bundleID) }   // cached; never a HAL call on the main thread
 
     Section("Mix") {
         Button { editor.addBus(atCursor: atCursor) } label: { Label("Bus", systemImage: "arrow.triangle.merge") }

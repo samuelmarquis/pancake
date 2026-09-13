@@ -20,6 +20,10 @@ struct MenuContent: View {
 
             VolumeSlider(model: model)
 
+            if let warning = model.coreAudioWarning {
+                CoreAudioWarningRow(text: warning)
+            }
+
             Divider().padding(.vertical, 2)
 
             // OUTPUT
@@ -337,6 +341,32 @@ private struct StageSection: View {
             }
         }
         .onAppear { model.refreshStage() }
+    }
+}
+
+/// coreaudiod is unhealthy in a way that slows every app's audio (duplicate plug-in registrations).
+/// Not pancake's state, so the fix is a command, offered with a copy button.
+private struct CoreAudioWarningRow: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Core Audio is degraded").font(.system(size: 12, weight: .semibold))
+                Text(text).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button(copied ? "Copied" : "Copy fix command") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(HALHealth.resetCommand, forType: .string)
+                    copied = true
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 4)
     }
 }
 
