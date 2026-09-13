@@ -63,6 +63,19 @@ and the IOProc applies a `pk_matrix` of routes — `out[b][c] += in[b][c] * gain
 atomically. `Graph` is the desired state (JSON at `~/.config/pancake/graph.json`); the engine
 derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, engine watches it.
 
+**Buses** are the one node kind with a port on both sides (`NodeKind.bus`, `isSource && isSink`).
+The IOProc has `PK_MAX_BUSES` (8) preallocated stereo scratch buffers and evaluates the matrix in
+stages: routes reading device/tap inputs first (they may target buses, recorders or outputs), then
+each bus in dependency order — `process_bus` (the self-authored compressor: feed-forward,
+stereo-linked peak detector, soft knee, log-domain attack/release smoothing; then makeup and trim)
+followed by the routes that read that bus. `MatrixCompiler` orders buses with Kahn's algorithm so
+bus→bus is a DAG; a cycle drops the links that close it, with a warning. `BusParams` live in
+`Graph.buses` (keyed by node id, written only when non-default) and are *not* topology, so editing
+the compressor hot-swaps the matrix like a gain; the compressor's envelope lives in the `pk_context`
+per slot, so a swap doesn't reset it. Time constants are baked to per-sample coefficients by the
+compiler for the run's sample rate. `Engine.busMeter` exposes last-cycle gain reduction + peak.
+Proven by `BusTests` (sample-exact summing/fan-out, trim, the gain computer at 20:1, attack smoothing).
+
 **The engine owns every process tap — one per app, ever.** Two Core Audio taps on the same process
 family fight and one goes silent (seen live: the Stage's tap of Helium was starved the moment the
 engine also tapped Helium for a recorder; whichever tap was created last won, which is why "it worked
@@ -169,6 +182,12 @@ because the ring lives in the context, not the matrix.
   so they never visibly fought): with the engine tapping Helium for a recorder and the Stage tapping
   it for the share, `probe-aggregate "Pancake Program"` read 0.000 while the app ran and 0.888 the
   moment it was stopped. Hence "the engine owns every tap".
+- **Buses + the compressor, verified live (2026-09-13).** CLI engine, `tap:QuickTime → bus → mic`,
+  QuickTime playing a −54 dBFS tone (0.002): bus trim ×4 → `probe-aggregate "Pancake Mic"` read 0.008;
+  editing the graph file to turn the compressor on (threshold −70, 20:1, instant) logged `matrix swapped
+  (gains changed)` — no rebuild — and Mic read 0.001 (−15 dB of reduction on top of the trim, as the
+  gain computer predicts); off again → 0.008. Note for scripted tests: the graph watcher is a
+  *directory* source, so replace the file atomically (`mv` a temp file in) — an in-place `cp` is invisible.
 - **Taps follow their app in place, verified live (2026-09-13).** CLI engine with
   `tap:com.apple.QuickTimePlayerX → mic`, QuickTime playing a −54 dBFS tone: `probe-aggregate "Pancake
   Mic"` read 0.002; quit QuickTime → *no rebuild*, Mic read 0.000; relaunch → log `now capturing 1
@@ -217,12 +236,14 @@ because the ring lives in the context, not the matrix.
    **node positions live in a separate `~/.config/pancake/graph-layout.json`** so the IPC stays clean.
    **Screen-share is integrated**: the **Pancake Program** node is a real sink (`NodeKind.program`,
    mirror of `mic`); whatever you wire into it is what the stream carries, and the engine does the
-   mixing. Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
+   mixing. **Buses** sit mid-canvas (three columns once one exists; a new bus drops below everything
+   so it overlaps nothing) with a port on each side; the card has a COMP toggle, a live GR/peak
+   readout and a settings popover (sliders edit `BusParams` live). Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
    (its legend drops out when the window is narrow); the window opens fitting a tidied graph and shrinks
    much smaller. Remaining polish if wanted: zoom, multi-select, marquee.
 
    Deliberately NOT done — **plugin (AU/VST/CLAP) inserts in the graph.** It would break invariant #3:
-   the IOProc is pure C gain-routing (`out += in*gain`, no alloc/locks/ObjC/Swift), and hosting a plugin
-   means calling its render inside that callback. Doing it RT-safely is a separate project (a side
-   `AVAudioEngine` graph, or an out-of-line render chain feeding a tap), not a contained change. Left
-   for a future leg; the graph model is bipartite (source-out → sink-in) on purpose.
+   the IOProc is pure C gain-routing plus our own DSP (no alloc/locks/ObjC/Swift), and hosting a plugin
+   means calling its render inside that callback. Doing it RT-safely is a separate project (an
+   out-of-line render chain on rings), not a contained change — see `TODO.md` for the blast radius.
+   The bipartite break it needs (both-sides nodes) is already done by the bus node.

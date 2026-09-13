@@ -1,4 +1,5 @@
 #include "CPancakeRT.h"
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,12 @@ struct pk_context {
     _Atomic uint32_t    in_peak_bits[PK_METER_BUFFERS];   // float bits; atomics on floats aren't portable
     _Atomic uint32_t    out_peak_bits[PK_METER_BUFFERS];
     pk_recorder         recorders[PK_MAX_RECORDERS];
+    // Buses. `scratch` is this cycle's mix (PK_REC_MAX_CYCLE_FRAMES * PK_BUS_CHANNELS); `env` is the
+    // compressor's smoothed gain reduction in dB (IOProc-private); the *_bits are meters for the UI.
+    float* _Nullable    bus_scratch[PK_MAX_BUSES];
+    float               bus_env[PK_MAX_BUSES];
+    _Atomic uint32_t    bus_gr_bits[PK_MAX_BUSES];
+    _Atomic uint32_t    bus_peak_bits[PK_MAX_BUSES];
 };
 
 static inline float buffer_peak(const AudioBuffer* b)
@@ -56,6 +63,10 @@ pk_context* pk_context_create(void)
         ctx->recorders[i].scratch = calloc((size_t)PK_REC_MAX_CYCLE_FRAMES * PK_REC_CHANNELS, sizeof(float));
         if (!ctx->recorders[i].ring || !ctx->recorders[i].scratch) { pk_context_destroy(ctx); return NULL; }
     }
+    for (uint32_t i = 0; i < PK_MAX_BUSES; i++) {
+        ctx->bus_scratch[i] = calloc((size_t)PK_REC_MAX_CYCLE_FRAMES * PK_BUS_CHANNELS, sizeof(float));
+        if (!ctx->bus_scratch[i]) { pk_context_destroy(ctx); return NULL; }
+    }
     return ctx;
 }
 
@@ -68,6 +79,7 @@ void pk_context_destroy(pk_context* ctx)
         free(ctx->recorders[i].ring);
         free(ctx->recorders[i].scratch);
     }
+    for (uint32_t i = 0; i < PK_MAX_BUSES; i++) free(ctx->bus_scratch[i]);
     free(ctx);
 }
 
@@ -76,11 +88,32 @@ pk_matrix* pk_matrix_alloc(uint32_t route_count)
     pk_matrix* m = calloc(1, sizeof(pk_matrix));
     if (!m) return NULL;
     m->route_count = route_count;
+    m->stage1_count = route_count;   // no buses: everything is stage 1
     if (route_count) {
         m->routes = calloc(route_count, sizeof(pk_route));
         if (!m->routes) { free(m); return NULL; }
     }
     return m;
+}
+
+void pk_matrix_set_stages(pk_matrix* m, uint32_t stage1_count, uint32_t bus_count, const uint32_t* order, const uint32_t* seg_end)
+{
+    if (!m) return;
+    if (bus_count > PK_MAX_BUSES) bus_count = PK_MAX_BUSES;
+    if (stage1_count > m->route_count) stage1_count = m->route_count;
+    m->stage1_count = stage1_count;
+    m->bus_count = bus_count;
+    for (uint32_t k = 0; k < bus_count; k++) {
+        m->bus_order[k]   = order   ? order[k]   : k;
+        uint32_t end      = seg_end ? seg_end[k] : m->route_count;
+        m->bus_seg_end[k] = end > m->route_count ? m->route_count : end;
+    }
+}
+
+void pk_matrix_set_bus(pk_matrix* m, uint32_t slot, pk_bus_params params)
+{
+    if (!m || slot >= PK_MAX_BUSES) return;
+    m->bus[slot] = params;
 }
 
 void pk_matrix_free(pk_matrix* m)
@@ -181,10 +214,119 @@ uint64_t pk_recorder_overrun_frames(const pk_context* ctx, uint32_t index)
     return atomic_load_explicit(&ctx->recorders[index].overrun_frames, memory_order_relaxed);
 }
 
+float pk_bus_gain_reduction_db(const pk_context* ctx, uint32_t index)
+{
+    if (!ctx || index >= PK_MAX_BUSES) return 0.0f;
+    return bits_to_float(atomic_load_explicit(&ctx->bus_gr_bits[index], memory_order_relaxed));
+}
+
+float pk_bus_peak(const pk_context* ctx, uint32_t index)
+{
+    if (!ctx || index >= PK_MAX_BUSES) return 0.0f;
+    return bits_to_float(atomic_load_explicit(&ctx->bus_peak_bits[index], memory_order_relaxed));
+}
+
 static inline uint32_t frames_in(const AudioBuffer* b)
 {
     uint32_t ch = b->mNumberChannels ? b->mNumberChannels : 1;
     return b->mDataByteSize / (ch * (uint32_t)sizeof(float));
+}
+
+/// The bus processor: compressor (if enabled) then trim, in place on the bus scratch. Pure C DSP —
+/// a few transcendental calls per frame, no allocation, no locks — so it's fine inside the IOProc.
+/// Gain computer in the log domain with a soft knee (Giannoulis/Massberg/Reiss); the gain reduction
+/// (≤ 0 dB) is smoothed with a one-pole: attack coefficient while reduction is increasing, release
+/// while it's recovering. Stereo-linked: one detector on max(|L|,|R|), one gain on both channels.
+static inline void process_bus(pk_context* ctx, uint32_t b, const pk_bus_params* p, uint32_t n)
+{
+    float* s = ctx->bus_scratch[b];
+    float env = ctx->bus_env[b];
+    float gr_min = 0.0f;
+    if (p->comp_enabled) {
+        const float T = p->threshold_db, W = p->knee_db, slope = (1.0f / p->ratio) - 1.0f;
+        const float half = W * 0.5f;
+        for (uint32_t f = 0; f < n; f++) {
+            float L = s[f * PK_BUS_CHANNELS], R = s[f * PK_BUS_CHANNELS + 1];
+            float x = fabsf(L) > fabsf(R) ? fabsf(L) : fabsf(R);
+            float xdb = 20.0f * log10f(x > 1e-7f ? x : 1e-7f);   // −140 dB floor keeps log finite
+            float over = xdb - T, gr;
+            if (W > 0.0f && over > -half && over < half) { float d = over + half; gr = slope * d * d / (2.0f * W); }
+            else if (over >= half)                        { gr = slope * over; }
+            else                                          { gr = 0.0f; }
+            float coef = gr < env ? p->attack_coef : p->release_coef;
+            env = coef * env + (1.0f - coef) * gr;
+            if (env < gr_min) gr_min = env;
+            float g = powf(10.0f, env * 0.05f) * p->makeup;
+            s[f * PK_BUS_CHANNELS]     = L * g;
+            s[f * PK_BUS_CHANNELS + 1] = R * g;
+        }
+    } else {
+        env = 0.0f;   // re-enabling starts clean
+    }
+    ctx->bus_env[b] = env;
+    if (p->trim != 1.0f) {
+        for (uint32_t i = 0; i < n * PK_BUS_CHANNELS; i++) s[i] *= p->trim;
+    }
+    float peak = 0.0f;
+    for (uint32_t i = 0; i < n * PK_BUS_CHANNELS; i++) { float v = fabsf(s[i]); if (v > peak) peak = v; }
+    atomic_store_explicit(&ctx->bus_gr_bits[b], float_to_bits(gr_min), memory_order_relaxed);
+    atomic_store_explicit(&ctx->bus_peak_bits[b], float_to_bits(peak), memory_order_relaxed);
+}
+
+/// Run routes[from, to). The source is an aggregate input buffer or a bus; the destination an
+/// aggregate output buffer, a recorder or a bus. `mix_frames` bounds the scratch-backed sides.
+static inline uint64_t run_routes(pk_context* ctx, const pk_matrix* m, uint32_t from, uint32_t to,
+                                  const AudioBufferList* in, AudioBufferList* out, uint32_t mix_frames)
+{
+    uint64_t skipped = 0;
+    for (uint32_t i = from; i < to && i < m->route_count; i++) {
+        const pk_route r = m->routes[i];
+        const float g = r.gain;
+        const float* src; uint32_t is, n_in;
+        if (r.in_buffer & PK_BUS_FLAG) {
+            const uint32_t bi = r.in_buffer & ~PK_BUS_FLAG;
+            if (bi >= PK_MAX_BUSES || r.in_channel >= PK_BUS_CHANNELS || !m->bus[bi].active) { skipped++; continue; }
+            src = ctx->bus_scratch[bi] + r.in_channel; is = PK_BUS_CHANNELS; n_in = mix_frames;
+        } else {
+            if (r.in_buffer >= in->mNumberBuffers) { skipped++; continue; }
+            const AudioBuffer* ib = &in->mBuffers[r.in_buffer];
+            if (!ib->mData || r.in_channel >= ib->mNumberChannels) { skipped++; continue; }
+            src = (const float*)ib->mData + r.in_channel; is = ib->mNumberChannels; n_in = frames_in(ib);
+        }
+
+        if (r.out_buffer & PK_REC_FLAG) {
+            // Recorder destination: mix into its stereo scratch.
+            const uint32_t ri = r.out_buffer & ~PK_REC_FLAG;
+            if (ri >= PK_MAX_RECORDERS || r.out_channel >= PK_REC_CHANNELS) { skipped++; continue; }
+            pk_recorder* rec = &ctx->recorders[ri];
+            if (!rec->scratch || !atomic_load_explicit(&rec->active, memory_order_relaxed)) { skipped++; continue; }
+            uint32_t n = n_in < mix_frames ? n_in : mix_frames;
+            if (!n || g == 0.0f) continue;
+            float* dst = rec->scratch + r.out_channel;
+            for (uint32_t f = 0; f < n; f++) dst[f * PK_REC_CHANNELS] += src[f * is] * g;
+        } else if (r.out_buffer & PK_BUS_FLAG) {
+            // Bus destination: mix into the bus scratch (processed and read in a later stage).
+            const uint32_t bi = r.out_buffer & ~PK_BUS_FLAG;
+            if (bi >= PK_MAX_BUSES || r.out_channel >= PK_BUS_CHANNELS || !m->bus[bi].active) { skipped++; continue; }
+            uint32_t n = n_in < mix_frames ? n_in : mix_frames;
+            if (!n || g == 0.0f) continue;
+            float* dst = ctx->bus_scratch[bi] + r.out_channel;
+            for (uint32_t f = 0; f < n; f++) dst[f * PK_BUS_CHANNELS] += src[f * is] * g;
+        } else {
+            // Aggregate output stream.
+            if (r.out_buffer >= out->mNumberBuffers) { skipped++; continue; }
+            AudioBuffer* ob = &out->mBuffers[r.out_buffer];
+            if (!ob->mData || r.out_channel >= ob->mNumberChannels) { skipped++; continue; }
+            uint32_t n = n_in;
+            uint32_t no = frames_in(ob);
+            if (no < n) n = no;
+            if (!n || g == 0.0f) continue;
+            float* dst = (float*)ob->mData + r.out_channel;
+            const uint32_t os = ob->mNumberChannels;
+            for (uint32_t f = 0; f < n; f++) dst[f * os] += src[f * is] * g;
+        }
+    }
+    return skipped;
 }
 
 OSStatus pk_ioproc(AudioObjectID inDevice,
@@ -236,40 +378,21 @@ OSStatus pk_ioproc(AudioObjectID inDevice,
     if (!m) {
         atomic_fetch_add_explicit(&ctx->cycles_without_matrix, 1, memory_order_relaxed);
     } else if (inInputData && outOutputData) {
-        uint64_t skipped = 0;
-        for (uint32_t i = 0; i < m->route_count; i++) {
-            const pk_route r = m->routes[i];
-            if (r.in_buffer >= inInputData->mNumberBuffers) { skipped++; continue; }
-            const AudioBuffer* ib = &inInputData->mBuffers[r.in_buffer];
-            if (!ib->mData || r.in_channel >= ib->mNumberChannels) { skipped++; continue; }
-            const uint32_t is = ib->mNumberChannels;
-            const float* src = (const float*)ib->mData + r.in_channel;
-            const float g = r.gain;
-            const uint32_t n_in = frames_in(ib);
-
-            if (r.out_buffer & PK_REC_FLAG) {
-                // Recorder destination: mix into its stereo scratch.
-                const uint32_t ri = r.out_buffer & ~PK_REC_FLAG;
-                if (ri >= PK_MAX_RECORDERS || r.out_channel >= PK_REC_CHANNELS) { skipped++; continue; }
-                pk_recorder* rec = &ctx->recorders[ri];
-                if (!rec->scratch || !atomic_load_explicit(&rec->active, memory_order_relaxed)) { skipped++; continue; }
-                uint32_t n = n_in < rec_frames ? n_in : rec_frames;
-                if (!n || g == 0.0f) continue;
-                float* dst = rec->scratch + r.out_channel;
-                for (uint32_t f = 0; f < n; f++) dst[f * PK_REC_CHANNELS] += src[f * is] * g;
-            } else {
-                // Aggregate output stream.
-                if (r.out_buffer >= outOutputData->mNumberBuffers) { skipped++; continue; }
-                AudioBuffer* ob = &outOutputData->mBuffers[r.out_buffer];
-                if (!ob->mData || r.out_channel >= ob->mNumberChannels) { skipped++; continue; }
-                uint32_t n = n_in;
-                uint32_t no = frames_in(ob);
-                if (no < n) n = no;
-                if (!n || g == 0.0f) continue;
-                float* dst = (float*)ob->mData + r.out_channel;
-                const uint32_t os = ob->mNumberChannels;
-                for (uint32_t f = 0; f < n; f++) dst[f * os] += src[f * is] * g;
-            }
+        // Clear this matrix's active buses (bus routes accumulate into them).
+        for (uint32_t b = 0; b < PK_MAX_BUSES; b++) {
+            if (m->bus[b].active && ctx->bus_scratch[b])
+                memset(ctx->bus_scratch[b], 0, (size_t)rec_frames * PK_BUS_CHANNELS * sizeof(float));
+        }
+        // Stage 1: everything that reads a device/tap input.
+        uint64_t skipped = run_routes(ctx, m, 0, m->stage1_count, inInputData, outOutputData, rec_frames);
+        // Stage 2: each bus in dependency order — process it, then run the routes that read it.
+        uint32_t seg = m->stage1_count;
+        for (uint32_t k = 0; k < m->bus_count && k < PK_MAX_BUSES; k++) {
+            const uint32_t b = m->bus_order[k];
+            if (b < PK_MAX_BUSES && m->bus[b].active && ctx->bus_scratch[b]) process_bus(ctx, b, &m->bus[b], rec_frames);
+            const uint32_t end = m->bus_seg_end[k];
+            skipped += run_routes(ctx, m, seg, end, inInputData, outOutputData, rec_frames);
+            if (end > seg) seg = end;
         }
         if (skipped) atomic_fetch_add_explicit(&ctx->routes_skipped, skipped, memory_order_relaxed);
     }

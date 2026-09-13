@@ -81,6 +81,55 @@ import Testing
         #expect(r.routes.map { "\($0)" }.sorted() == ["b0c0 -> b1c0 ×1.0", "b0c0 -> b3c0 ×1.0", "b0c1 -> b1c1 ×1.0", "b0c1 -> b3c1 ×1.0"])
     }
 
+    /// Bus routes are staged: device-sourced routes first, then each bus's outgoing routes after it,
+    /// with a bus that feeds another bus ordered first.
+    @Test func busesAreStagedInDependencyOrder() {
+        var g = Graph.stereoOutput("pods")
+        let a = Node.bus(id: "a"), b = Node.bus(id: "b")
+        g.upsert(a); g.upsert(b); g.upsert(.mic)
+        g.upsert(.tap("com.example.app", label: "App"))
+        for ch in 0..<2 {
+            g.connect(Port("tap:com.example.app", ch), Port(b.id, ch))       // tap → B
+            g.connect(Port(b.id, ch), Port(a.id, ch))                        // B → A  (so B must run first)
+            g.connect(Port(Graph.hubID, ch), Port(a.id, ch), gain: 0.5)      // hub → A
+            g.connect(Port(a.id, ch), Port(Graph.micID, ch))                 // A → mic
+        }
+        var p = BusParams(); p.compressor = true; p.attack = 0; p.threshold = -12
+        g.setBusParams(a.id, p)
+        let r = MatrixCompiler.compile(graph: g, layout: layout, hubUID: "hub", micUID: "pmic", programUID: "prog",
+                                       busSlots: [a.id: 0, b.id: 1], sampleRate: 48000)
+        #expect(r.warnings.isEmpty, Comment(rawValue: "\(r.warnings)"))
+        #expect(r.busOrder == [1, 0], "B (slot 1) feeds A (slot 0), so B is processed first")
+        // stage 1 = hub→pods (2) + tap→B (2) + hub→A (2) = 6; then B's segment (B→A, 2); then A's (A→mic, 2)
+        #expect(r.stage1Count == 6)
+        #expect(r.segmentEnds == [8, 10])
+        #expect(r.routes.count == 10)
+        #expect(r.routes[0..<6].allSatisfy { $0.readsBus == nil })
+        #expect(r.routes[6..<8].allSatisfy { $0.readsBus == 1 && $0.writesBus == 0 })
+        #expect(r.routes[8..<10].allSatisfy { $0.readsBus == 0 })
+        // A's baked params: compressor on, instant attack (coef 0), default release baked for 48k.
+        let ba = r.buses.first { $0.slot == 0 }!
+        #expect(ba.rt.comp_enabled == 1 && ba.rt.threshold_db == -12 && ba.rt.attack_coef == 0)
+        #expect(ba.rt.release_coef > 0.99 && ba.rt.release_coef < 1)
+        #expect(r.buses.first { $0.slot == 1 }!.rt.comp_enabled == 0)
+    }
+
+    @Test func busCycleIsBrokenWithAWarning() {
+        var g = Graph.stereoOutput("pods")
+        let a = Node.bus(id: "a"), b = Node.bus(id: "b")
+        g.upsert(a); g.upsert(b); g.upsert(.mic)
+        g.connect(Port(Graph.hubID, 0), Port(a.id, 0))
+        g.connect(Port(a.id, 0), Port(b.id, 0))
+        g.connect(Port(b.id, 0), Port(a.id, 0))      // closes a cycle
+        g.connect(Port(b.id, 0), Port(Graph.micID, 0))
+        let r = MatrixCompiler.compile(graph: g, layout: layout, hubUID: "hub", micUID: "pmic", programUID: "prog",
+                                       busSlots: [a.id: 0, b.id: 1])
+        #expect(r.warnings.contains { $0.contains("cycle") })
+        #expect(!r.routes.contains { $0.readsBus != nil && $0.writesBus != nil }, "bus↔bus links dropped")
+        #expect(r.routes.count == 4)   // hub→pods ×2, hub→A, B→mic
+        #expect(Set(r.busOrder) == [0, 1])
+    }
+
     @Test func outOfRangeChannelIsWarnedNotCrashed() {
         var g = Graph.stereoOutput("pods")
         g.links.append(Link(from: Port(Graph.hubID, 7), to: Port("out:pods", 0)))

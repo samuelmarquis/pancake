@@ -60,6 +60,30 @@ import Testing
         #expect(try Graph(jsonString: text) == g)
     }
 
+    @Test func busIsBothSidesAndItsParamsPersistOnlyWhenSet() throws {
+        var g = Graph.stereoOutput("dev-a")
+        let bus = Node.bus(id: "b1", label: "Bus 1")
+        g.upsert(bus); g.upsert(.mic)
+        g.connect(Port(Graph.hubID, 0), Port(bus.id, 0))
+        g.connect(Port(bus.id, 0), Port(Graph.micID, 0))
+        #expect(bus.kind.isSource && bus.kind.isSink)
+        let plain = try g.jsonString()
+        #expect(!plain.contains("\"buses\""), "defaults aren't written")
+        var p = BusParams(); p.compressor = true; p.threshold = -24
+        g.setBusParams(bus.id, p)
+        let text = try g.jsonString()
+        #expect(text.contains("\"buses\"") && text.contains("\"compressor\""), Comment(rawValue: text))
+        let back = try Graph(jsonString: text)
+        #expect(back == g)
+        #expect(back.busParams(bus.id).threshold == -24)
+        #expect(back.busParams(bus.id).release == 120, "unset fields decode to defaults")
+        // Param changes are not topology; removing the node drops its params.
+        var tweaked = g; tweaked.buses[bus.id]!.ratio = 8
+        #expect(g.hasSameTopology(as: tweaked))
+        tweaked.remove(bus.id)
+        #expect(tweaked.buses[bus.id] == nil)
+    }
+
     @Test func missingGainDecodesAsUnity() throws {
         let json = #"{"nodes":[{"id":"hub","kind":{"type":"hub"}},{"id":"out:x","kind":{"type":"output","device":"x"}}],"links":[{"from":{"node":"hub","channel":0},"to":{"node":"out:x","channel":0}}]}"#
         let g = try Graph(jsonString: json)

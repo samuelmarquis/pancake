@@ -329,6 +329,36 @@ public final class Engine {
         return map
     }
 
+    /// (Re)assign each bus node a stable bus slot. Slots are a fixed pool (PK_MAX_BUSES); a bus past
+    /// the limit gets no slot and is left unrouted with a warning.
+    private func syncBusSlots(_ graph: Graph) -> [NodeID: Int] {
+        let ids = graph.nodes.compactMap { node -> NodeID? in
+            if case .bus = node.kind { return node.id } else { return nil }
+        }
+        let want = Set(ids)
+        var map = busSlots.filter { want.contains($0.key) }
+        var used = Set(map.values)
+        for id in ids.sorted() where map[id] == nil {
+            guard let free = (0..<Int(PK_MAX_BUSES)).first(where: { !used.contains($0) }) else {
+                Log.warn("bus \(id): no free slot (max \(PK_MAX_BUSES)); it won't route")
+                continue
+            }
+            map[id] = free
+            used.insert(free)
+        }
+        busSlots = map
+        return map
+    }
+
+    /// The most gain reduction (dB, ≤ 0) a bus's compressor applied last cycle, and its post-processing
+    /// peak (0…1) — for the node's meter. Zero if the bus isn't running.
+    public func busMeter(_ node: NodeID) -> (gainReduction: Float, peak: Float) {
+        queue.sync {
+            guard let slot = busSlots[node] else { return (0, 0) }
+            return (pk_bus_gain_reduction_db(rt, UInt32(slot)), pk_bus_peak(rt, UInt32(slot)))
+        }
+    }
+
     private func ensureDrainTimer() {
         guard recordDrainTimer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -376,6 +406,9 @@ public final class Engine {
     private var wantedTapBundleIDs: [String] = []
     /// Recorder node id → its pk_context recorder slot, (re)assigned whenever the matrix compiles.
     private var recorderSlots: [NodeID: Int] = [:]
+    /// Bus node id → its pk_context bus slot, likewise. Stable across compiles so the compressor's
+    /// envelope (which lives in the context, per slot) follows the node.
+    private var busSlots: [NodeID: Int] = [:]
     /// Active recordings by node id, each draining its ring to a file. All touched only on `queue`.
     private var recordings: [NodeID: RecordingSession] = [:]
     private var recordDrainTimer: DispatchSourceTimer?
@@ -693,8 +726,8 @@ public final class Engine {
                     notes.append("refusing to tap \(bundleID): that's pancake itself — it would feed back. Dropping.")
                     g.remove(node.id)
                 }
-            case .hub, .mic, .program, .recorder:
-                break   // hub/mic/program handled below; a recorder is a virtual sink with no device
+            case .hub, .mic, .program, .recorder, .bus:
+                break   // hub/mic/program handled below; recorders and buses are virtual, always present
             }
         }
         if g.node(Graph.micID) != nil, present[configuration.micUID] == nil {
@@ -778,10 +811,11 @@ public final class Engine {
            cur.subDevices == composition.subDevices, cur.taps == composition.taps,
            cur.mainSubDeviceUID == composition.mainSubDeviceUID,
            case .running(let info) = currentState {
-            let slots = syncRecorderSlots(graph)
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
+            let slots = syncRecorderSlots(graph), buses = syncBusSlots(graph)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID,
+                                                  recorderSlots: slots, busSlots: buses, sampleRate: agg.nominalSampleRate)
             compiled.warnings.forEach { Log.warn($0) }
-            if let matrix = MatrixCompiler.makeMatrix(compiled.routes) {
+            if let matrix = MatrixCompiler.makeMatrix(compiled) {
                 let cycles = pk_context_cycles(rt)
                 if let old = pk_context_swap_matrix(rt, matrix) { retired.append((old, cycles)) }
                 drainRetiredLater()
@@ -825,10 +859,11 @@ public final class Engine {
             self.layout = layout
             Log.debug("layout: \(layout)")
 
-            let slots = syncRecorderSlots(graph)
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
+            let slots = syncRecorderSlots(graph), buses = syncBusSlots(graph)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID,
+                                                  recorderSlots: slots, busSlots: buses, sampleRate: agg.nominalSampleRate)
             compiled.warnings.forEach { Log.warn($0) }
-            guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else {
+            guard let matrix = MatrixCompiler.makeMatrix(compiled) else {
                 throw ChannelLayout.ResolutionError(description: "matrix allocation failed")
             }
             if let old = pk_context_swap_matrix(rt, matrix) { pk_matrix_free(old) }
@@ -859,10 +894,11 @@ public final class Engine {
         }
         let devices = AudioDevice.all(includeHidden: true)
         let (graph, _) = effectiveGraph(from: desiredGraph, devices: devices)
-        let slots = syncRecorderSlots(graph)
-        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
+        let slots = syncRecorderSlots(graph), buses = syncBusSlots(graph)
+        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID,
+                                              recorderSlots: slots, busSlots: buses, sampleRate: info.sampleRate)
         compiled.warnings.forEach { Log.warn($0) }
-        guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else { return }
+        guard let matrix = MatrixCompiler.makeMatrix(compiled) else { return }
         let cycles = pk_context_cycles(rt)
         if let old = pk_context_swap_matrix(rt, matrix) { retired.append((old, cycles)) }
         Log.info("matrix swapped (\(reason)): \(compiled.routes.count) routes")

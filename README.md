@@ -61,6 +61,11 @@ input locks, "Reconnect" for stolen Bluetooth, screen-share start/stop, and
   its own knob; the engine mixes them. One app can feed the stream, a recorder and
   Discord's mic at once from a single tap. (Verified live: a Discord window-share
   of one app's audio, friends heard it clearly, no echo.)
+- **Buses**: add a **Bus** node (it sits mid-canvas with a port on each side), wire
+  anything into it and its sum out to anything. Each bus has a **compressor**
+  (threshold, ratio, attack, release, soft knee, makeup) and a trim — pancake's
+  own realtime-safe DSP, running inside the audio callback with no added latency —
+  with a live gain-reduction readout on the card. Buses can feed buses.
 - **Record anything to disk**: add a **Recorder** node and wire any source(s)
   into it — it has a record/stop button, a live timer, and a folder button to
   pick where the take lands (defaults to a timestamped `.wav` in `~/Music/Pancake`).

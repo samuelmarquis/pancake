@@ -138,17 +138,21 @@ private struct GraphCanvas: View {
     }
 
     @ViewBuilder private func cardBody(_ node: GNode) -> some View {
-        if case .recorder = node.kind {
-            RecorderCard(editor: editor, node: node, hovered: editor.hoveredNode == node.id)
-        } else {
-            NodeCard(node: node, hovered: editor.hoveredNode == node.id)
+        switch node.kind {
+        case .recorder: RecorderCard(editor: editor, node: node, hovered: editor.hoveredNode == node.id)
+        case .bus: BusCard(app: app, editor: editor, node: node, hovered: editor.hoveredNode == node.id)
+        default: NodeCard(node: node, hovered: editor.hoveredNode == node.id)
         }
     }
 
+    /// One dot per port: sources on the right, sinks on the left, a bus both.
     private var portDots: some View {
         ForEach(editor.gnodes) { node in
-            if let c = editor.portCenter(node.id) {
-                PortDot(editor: editor, node: node, model: c)
+            if let c = editor.portCenter(node.id, source: false) {
+                PortDot(editor: editor, node: node, isSource: false, model: c)
+            }
+            if let c = editor.portCenter(node.id, source: true) {
+                PortDot(editor: editor, node: node, isSource: true, model: c)
             }
         }
     }
@@ -458,6 +462,147 @@ private struct RecorderCard: View {
     }
 }
 
+/// A summing bus: the usual card, but its second line is the processor — a compressor toggle, a live
+/// gain-reduction readout while it's working, and a gear that opens the bus's settings (threshold,
+/// ratio, attack, release, knee, makeup, trim).
+private struct BusCard: View {
+    @ObservedObject var app: AppModel
+    @ObservedObject var editor: GraphEditorModel
+    let node: GNode
+    let hovered: Bool
+    @State private var showSettings = false
+
+    private var color: Color { GraphPalette.color(for: node.kind) }
+    private var params: BusParams { app.graph.busParams(node.id) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(color.opacity(0.9))
+                Image(systemName: "arrow.triangle.merge").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+            }
+            .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(node.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 7) {
+                    Button {
+                        var p = params; p.compressor.toggle(); app.setBusParams(node.id, p)
+                    } label: {
+                        Text("COMP")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(params.compressor ? color : Color.primary.opacity(0.10), in: Capsule())
+                            .foregroundStyle(params.compressor ? .black : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(params.compressor ? "Compressor on — click to bypass" : "Compressor off — click to enable")
+                    BusMeter(app: app, node: node.id, color: color, compressing: params.compressor)
+                    Spacer(minLength: 0)
+                    Button { showSettings.toggle() } label: {
+                        Image(systemName: "slider.horizontal.3").font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Bus settings")
+                    .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+                        BusSettings(app: app, node: node.id, title: node.title)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: GraphGeom.nodeWidth, height: GraphGeom.nodeHeight, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: GraphGeom.cornerRadius, style: .continuous)
+                .stroke(hovered ? color : Color.primary.opacity(0.10), lineWidth: hovered ? 1.8 : 1)
+        )
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2).fill(color)
+                .frame(width: 3.5, height: GraphGeom.nodeHeight - 18).padding(.leading, 4).opacity(0.9)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
+    }
+}
+
+/// The live readout on a bus card: gain reduction while the compressor works, else the bus peak.
+private struct BusMeter: View {
+    @ObservedObject var app: AppModel
+    let node: NodeID
+    let color: Color
+    let compressing: Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+            let m = app.busMeter(node)
+            if compressing {
+                Text(m.gainReduction < -0.05 ? String(format: "%.1f dB", m.gainReduction) : "0.0 dB")
+                    .font(.system(size: 10, weight: .medium, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(m.gainReduction < -0.05 ? color : .secondary)
+                    .help("Gain reduction")
+            } else {
+                Text(m.peak > 0.0005 ? String(format: "%.0f dBFS", 20 * log10(Double(m.peak))) : "silent")
+                    .font(.system(size: 10, weight: .medium, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .help("Bus peak")
+            }
+        }
+    }
+}
+
+/// The bus's processor, edited live: every change hot-swaps the engine's matrix (no rebuild).
+private struct BusSettings: View {
+    @ObservedObject var app: AppModel
+    let node: NodeID
+    let title: String
+
+    private var p: Binding<BusParams> {
+        Binding(get: { app.graph.busParams(node) }, set: { app.setBusParams(node, $0) })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Toggle("Compressor", isOn: p.compressor).toggleStyle(.switch).controlSize(.small)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                row("Threshold", value: p.threshold, in: -60...0, format: "%.0f dB")
+                row("Ratio", value: p.ratio, in: 1...20, format: "%.1f:1")
+                row("Attack", value: p.attack, in: 0...100, format: "%.0f ms")
+                row("Release", value: p.release, in: 5...1000, format: "%.0f ms")
+                row("Knee", value: p.knee, in: 0...24, format: "%.0f dB")
+                row("Makeup", value: p.makeup, in: 0...24, format: "%+.0f dB")
+            }
+            .disabled(!p.wrappedValue.compressor)
+            .opacity(p.wrappedValue.compressor ? 1 : 0.5)
+            Divider()
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("Trim").font(.system(size: 11)).gridColumnAlignment(.trailing)
+                    Slider(value: Binding(get: { Double(GainMath.dB(p.wrappedValue.trim)) },
+                                          set: { p.wrappedValue.trim = GainMath.linear($0) }), in: -24...12)
+                        .frame(width: 150)
+                    Text(GainMath.label(p.wrappedValue.trim) + " dB")
+                        .font(.system(size: 11, design: .rounded)).monospacedDigit().frame(width: 60, alignment: .trailing)
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
+    private func row(_ name: String, value: Binding<Float>, in range: ClosedRange<Double>, format: String) -> some View {
+        GridRow {
+            Text(name).font(.system(size: 11)).gridColumnAlignment(.trailing)
+            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Float($0) }), in: range)
+                .frame(width: 150)
+            Text(String(format: format, value.wrappedValue))
+                .font(.system(size: 11, design: .rounded)).monospacedDigit().frame(width: 60, alignment: .trailing)
+        }
+    }
+}
+
 /// Floating delete affordance à la iOS home-screen jiggle (minus the jiggle): a small dark bubble
 /// with a ✕, sat on the node's corner. Lives in a top layer so it's always clickable.
 private struct DeleteBubble: View {
@@ -482,6 +627,7 @@ private struct DeleteBubble: View {
 private struct PortDot: View {
     @ObservedObject var editor: GraphEditorModel
     let node: GNode
+    let isSource: Bool       // which of the node's ports this is (a bus has both)
     let model: CGPoint       // port centre in canvas/model space
 
     private var color: Color { GraphPalette.color(for: node.kind) }
@@ -499,12 +645,12 @@ private struct PortDot: View {
         .highPriorityGesture(
             DragGesture(minimumDistance: 2)
                 .onChanged { v in
-                    if editor.pending == nil { editor.beginConnection(from: node.id, isSource: node.isSource, at: model) }
+                    if editor.pending == nil { editor.beginConnection(from: node.id, isSource: isSource, at: model) }
                     editor.updateConnection(translation: v.translation)
                 }
                 .onEnded { _ in editor.endConnection() }
         )
-        .help(node.isSource ? "Output — drag to a sink" : "Input — drag to a source")
+        .help(isSource ? "Output — drag to a sink" : "Input — drag to a source")
     }
 }
 
@@ -570,6 +716,9 @@ private func addNodeItems(app: AppModel, editor: GraphEditorModel, atCursor: Boo
     let existingTaps = Set(app.graph.micTapBundleIDs)
     let apps = tappableApps().filter { !existingTaps.contains($0.bundleID) }
 
+    Section("Mix") {
+        Button { editor.addBus(atCursor: atCursor) } label: { Label("Bus", systemImage: "arrow.triangle.merge") }
+    }
     Section("Capture") {
         Button { editor.addRecorder(atCursor: atCursor) } label: { Label("Recorder", systemImage: "recordingtape") }
     }
@@ -634,6 +783,7 @@ private enum NodeGlyph {
         case .input: return "waveform"
         case .tap: return "app.fill"
         case .recorder: return "recordingtape"
+        case .bus: return "arrow.triangle.merge"
         case .output:
             let n = title.lowercased()
             if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }

@@ -2,36 +2,14 @@
 
 Scoped but not built. See `CLAUDE.md` for operational notes and `DESIGN.md` for the audio model.
 
-## Bus node (summing bus) — feasible, not a model-annihilator
+## Bus node + in-bus compressor — ✅ built (2026-09-13)
 
-A graph node with an arbitrary number of inputs (the editor always shows one empty input past the
-connected ones) and one output. Because the matrix already sums (`out += in*gain`), a bus only earns
-its keep when you need something direct fan-in can't give: **(a)** one master gain over a group,
-**(b)** processing on the sum, **(c)** the mix computed once and fanned to several destinations.
-
-All three need an **intermediate mix buffer**, which the RT context doesn't have today (it only holds
-the aggregate's device buffers). The change, bounded and coherent:
-
-- **CPancakeRT**: pre-allocated bus scratch buffers (allocated at rebuild, never in the IOProc) + a
-  two-stage pass — clear buses, sum `in→bus`, *process*, then route `bus→out`. Still C, no
-  alloc/locks in the callback (invariant #3 holds). Keep it one bus layer (no bus→bus) to avoid
-  topological ordering, or precompute an order for a DAG.
-- **Graph**: a `bus` node kind that is *both* source and sink — the one node with ports on both
-  sides. This is the "break bipartite" bit, but cleanly (bus sits mid-canvas, inputs left, output right).
-- **MatrixCompiler / Engine**: emit two-stage routes; carry per-bus params.
-- **Editor**: a mid-canvas node whose input count grows as you wire it (always one spare input).
-
-This bus node *is* "Layer 1" of the plugin work below (mid-graph both-sides nodes) — see the blast-radius
-notes there. Building the bus first means the plugin inherits the whole bipartite-break for free.
-
-## Compressor inside the bus — feasible, and unlike the plugin question
-
-The plugin problem is "run someone else's render (ObjC/alloc/locks) inside the realtime callback."
-A compressor **we write ourselves** is ~50 lines of C: envelope follower + gain curve +
-attack/release smoothing, state per bus channel, applied to the bus buffer between the two stages.
-No allocation, no locks, no Swift/ObjC — exactly the kind of DSP that's fine in the IOProc. So once
-buses exist, the compressor is a small, safe addition (threshold / ratio / attack / release / makeup,
-maybe soft knee). Expose the params on the bus node in the editor.
+Shipped as sketched: `NodeKind.bus` (the one both-sides node), preallocated bus scratch in
+`CPancakeRT`, a staged matrix (device routes → each bus in dependency order: compress, trim, then
+its outgoing routes; bus→bus is a DAG, cycles are broken with a warning), `BusParams` stored beside
+the links (a change hot-swaps the matrix like a gain), and a mid-canvas card with a compressor
+toggle, live gain-reduction meter and a settings popover. See CLAUDE.md § Buses. What's *not* done:
+an EQ (same shape as the compressor — a biquad or two per bus channel, in-cycle) if anyone wants it.
 
 ## Plugin (AU / VST3 / CLAP) inserts — declined for now; blast radius mapped
 
@@ -61,7 +39,8 @@ needs a port on *both* sides. Wide-but-shallow, measured against the tree as of 
   placing by `node.isSource`, `beginConnection(isSource:)`, `nearestNode(wantSource:)`, the
   sources-left/sinks-right `autoArrange`. Two ports on a node ⇒ connection + hit-testing + layout each
   need a real (not huge) rework.
-- **This whole layer is shared with the bus node above.** Build the bus first and the plugin inherits it.
+- **This whole layer is now built** (the bus node): both-sides ports, per-side hit-testing, three-column
+  layout. A plugin insert inherits it — only Layer 2 remains.
 
 **Layer 2 — out-of-line AU hosting (the actual project).** Depth concentrates in two new places:
 - **CPancakeRT**: per-insert in-ring + out-ring + route flags — the recorder ring generalized. Bounded.

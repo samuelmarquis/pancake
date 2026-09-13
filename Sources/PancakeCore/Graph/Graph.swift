@@ -34,20 +34,31 @@ public enum NodeKind: Hashable, Codable {
     /// it (app taps, the hub, a mic…) onto this silent virtual device, and the Stage plays it back
     /// as its own process output so a window-share of the Stage carries exactly this mix.
     case program
+    /// A summing bus: the one node with a port on *both* sides. Everything wired in is summed into
+    /// an intermediate buffer, processed there (compressor, trim — see `BusParams`), and the result
+    /// fans out to whatever the bus is wired to. `id` is stable so its parameters persist.
+    case bus(id: String)
 
+    /// Has an output port (something can be wired *from* it).
     public var isSource: Bool {
         switch self {
-        case .hub, .input, .tap: return true
+        case .hub, .input, .tap, .bus: return true
         case .mic, .output, .recorder, .program: return false
         }
     }
-    public var isSink: Bool { !isSource }
+    /// Has an input port (something can be wired *into* it). A bus is both.
+    public var isSink: Bool {
+        switch self {
+        case .mic, .output, .recorder, .program, .bus: return true
+        case .hub, .input, .tap: return false
+        }
+    }
 
     /// The device UID this node is backed by, for the kinds that are backed by a device.
     public var deviceUID: String? {
         switch self {
         case .input(let uid), .output(let uid): return uid
-        case .hub, .mic, .tap, .recorder, .program: return nil
+        case .hub, .mic, .tap, .recorder, .program, .bus: return nil
         }
     }
 
@@ -66,6 +77,7 @@ public enum NodeKind: Hashable, Codable {
         case "tap": self = .tap(bundleID: try c.decode(String.self, forKey: .bundle))
         case "recorder": self = .recorder(id: try c.decode(String.self, forKey: .id))
         case "program": self = .program
+        case "bus": self = .bus(id: try c.decode(String.self, forKey: .id))
         default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown node type \(type)")
         }
     }
@@ -80,7 +92,39 @@ public enum NodeKind: Hashable, Codable {
         case .tap(let b): try c.encode("tap", forKey: .type); try c.encode(b, forKey: .bundle)
         case .recorder(let id): try c.encode("recorder", forKey: .type); try c.encode(id, forKey: .id)
         case .program: try c.encode("program", forKey: .type)
+        case .bus(let id): try c.encode("bus", forKey: .type); try c.encode(id, forKey: .id)
         }
+    }
+}
+
+/// What a bus does to its sum. Not topology: changing these hot-swaps the routing matrix like a gain
+/// change, never rebuilds the aggregate. Persisted under `Graph.buses` keyed by the bus node's id,
+/// and only when non-default, so the file stays clean. All fields have defaults so a hand-edited
+/// block can name just the ones it cares about.
+public struct BusParams: Hashable, Codable {
+    /// The bus's own master gain, linear, always applied (after the compressor).
+    public var trim: Float = 1
+    public var compressor: Bool = false
+    public var threshold: Float = -18      // dBFS
+    public var ratio: Float = 4            // :1
+    public var attack: Float = 10          // ms
+    public var release: Float = 120        // ms
+    public var knee: Float = 6             // dB, 0 = hard
+    public var makeup: Float = 0           // dB
+
+    public init() {}
+
+    private enum CodingKeys: String, CodingKey { case trim, compressor, threshold, ratio, attack, release, knee, makeup }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        trim = try c.decodeIfPresent(Float.self, forKey: .trim) ?? 1
+        compressor = try c.decodeIfPresent(Bool.self, forKey: .compressor) ?? false
+        threshold = try c.decodeIfPresent(Float.self, forKey: .threshold) ?? -18
+        ratio = try c.decodeIfPresent(Float.self, forKey: .ratio) ?? 4
+        attack = try c.decodeIfPresent(Float.self, forKey: .attack) ?? 10
+        release = try c.decodeIfPresent(Float.self, forKey: .release) ?? 120
+        knee = try c.decodeIfPresent(Float.self, forKey: .knee) ?? 6
+        makeup = try c.decodeIfPresent(Float.self, forKey: .makeup) ?? 0
     }
 }
 
@@ -103,6 +147,7 @@ public struct Node: Hashable, Codable, Identifiable {
     public static func input(_ uid: String, label: String? = nil) -> Node { Node(id: NodeID("in:" + uid), kind: .input(deviceUID: uid), label: label) }
     public static func tap(_ bundleID: String, label: String? = nil) -> Node { Node(id: NodeID("tap:" + bundleID), kind: .tap(bundleID: bundleID), label: label) }
     public static func recorder(id: String = UUID().uuidString, label: String? = nil) -> Node { Node(id: NodeID("rec:" + id), kind: .recorder(id: id), label: label) }
+    public static func bus(id: String = UUID().uuidString, label: String? = nil) -> Node { Node(id: NodeID("bus:" + id), kind: .bus(id: id), label: label) }
 }
 
 public struct Port: Hashable, Codable, CustomStringConvertible {
@@ -180,26 +225,40 @@ public struct Graph: Hashable, Codable {
     /// Holding behaviour for the output/input sections. Persisted only when non-default so the
     /// graph file stays clean, and old files without it still load.
     public var policy: Policy
+    /// Per-bus processing, keyed by the bus node's id (`bus:…`). Absent = defaults. Like gains,
+    /// not topology (see `hasSameTopology`).
+    public var buses: [NodeID: BusParams]
 
-    public init(nodes: [Node] = [.hub], links: [Link] = [], policy: Policy = Policy()) {
+    public init(nodes: [Node] = [.hub], links: [Link] = [], policy: Policy = Policy(), buses: [NodeID: BusParams] = [:]) {
         self.nodes = nodes
         self.links = links
         self.policy = policy
+        self.buses = buses
     }
 
-    private enum CodingKeys: String, CodingKey { case nodes, links, policy }
+    private enum CodingKeys: String, CodingKey { case nodes, links, policy, buses }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         nodes = try c.decode([Node].self, forKey: .nodes)
         links = try c.decode([Link].self, forKey: .links)
         policy = try c.decodeIfPresent(Policy.self, forKey: .policy) ?? Policy()
+        let raw = try c.decodeIfPresent([String: BusParams].self, forKey: .buses) ?? [:]
+        buses = Dictionary(uniqueKeysWithValues: raw.map { (NodeID($0.key), $0.value) })
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(nodes, forKey: .nodes)
         try c.encode(links, forKey: .links)
         if policy != Policy() { try c.encode(policy, forKey: .policy) }
+        let nonDefault = buses.filter { $0.value != BusParams() }
+        if !nonDefault.isEmpty {
+            try c.encode(Dictionary(uniqueKeysWithValues: nonDefault.map { ($0.key.rawValue, $0.value) }), forKey: .buses)
+        }
     }
+
+    /// A bus's parameters (defaults if never set).
+    public func busParams(_ id: NodeID) -> BusParams { buses[id] ?? BusParams() }
+    public mutating func setBusParams(_ id: NodeID, _ p: BusParams) { buses[id] = p == BusParams() ? nil : p }
 
     /// The simplest useful graph: everything apps play goes to one output device, L→L, R→R.
     public static func stereoOutput(_ uid: String, label: String? = nil) -> Graph {
@@ -254,12 +313,14 @@ public struct Graph: Hashable, Codable {
     public mutating func remove(_ id: NodeID) {
         nodes.removeAll { $0.id == id }
         links.removeAll { $0.from.node == id || $0.to.node == id }
+        buses[id] = nil
     }
 
     /// Drops nodes nothing links to or from (except the hub, which is always present).
     public mutating func pruneOrphans() {
         let used = Set(links.flatMap { [$0.from.node, $0.to.node] })
         nodes.removeAll { $0.id != Graph.hubID && !used.contains($0.id) }
+        buses = buses.filter { b in nodes.contains { $0.id == b.key } }
     }
 
     public mutating func connect(_ from: Port, _ to: Port, gain: Float = 1) {

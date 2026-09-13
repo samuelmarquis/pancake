@@ -106,6 +106,7 @@ Node  = hub                           // "Pancake": what apps played (source)
       | tap(bundleID)                 // per-app capture, macOS 14.2+ (source)
       | program                       // "Pancake Program": the screen-share bus (sink)
       | recorder(id)                  // capture-to-disk (sink; not a device)
+      | bus(id)                       // summing bus: sink *and* source; compressor + trim on the sum
 
 Link  = { from: (Node, channel), to: (Node, channel), gain: Float = 1 }
 ```

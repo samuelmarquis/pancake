@@ -8,7 +8,8 @@ import UniformTypeIdentifiers
 
 /// Node cards are fixed-size and carry a single *bus* port per side (L/R is fungible here — a
 /// connection is one stereo-or-mono bus, drawn as bundled strands, never split). Sources put their
-/// port on the right edge, sinks on the left. `origin` is the card's top-left corner in canvas space.
+/// port on the right edge, sinks on the left; a summing bus has both. `origin` is the card's
+/// top-left corner in canvas space.
 enum GraphGeom {
     static let nodeWidth: CGFloat = 198
     static let nodeHeight: CGFloat = 60
@@ -60,6 +61,7 @@ enum GraphPalette {
         case .output: return Color(red: 0.20, green: 0.78, blue: 0.66)  // output teal
         case .tap: return Color(red: 0.38, green: 0.80, blue: 0.42)     // app green
         case .recorder: return Color(red: 0.92, green: 0.30, blue: 0.33) // record red
+        case .bus: return Color(red: 0.93, green: 0.78, blue: 0.28)     // mix-bus gold
         }
     }
 }
@@ -187,7 +189,7 @@ final class GraphEditorModel: ObservableObject {
 
     private func channelCount(id: NodeID, kind: NodeKind) -> Int {
         switch kind {
-        case .hub, .mic, .program, .tap, .recorder: return 2
+        case .hub, .mic, .program, .tap, .recorder, .bus: return 2
         case .output(let uid):
             if let d = app.device(forUID: uid) { return min(16, max(2, d.outputChannels)) }
             return inferredChannels(id: id)
@@ -208,7 +210,7 @@ final class GraphEditorModel: ObservableObject {
 
     private func isPresent(kind: NodeKind) -> Bool {
         switch kind {
-        case .hub, .mic, .program, .recorder: return true
+        case .hub, .mic, .program, .recorder, .bus: return true
         case .output(let uid), .input(let uid): return app.device(forUID: uid) != nil
         case .tap(let b): return NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == b }
         }
@@ -222,6 +224,7 @@ final class GraphEditorModel: ObservableObject {
         case .input(let uid), .output(let uid): return label ?? uid
         case .tap(let b): return label ?? b
         case .recorder: return label ?? "Recorder"
+        case .bus: return label ?? "Bus"
         }
     }
 
@@ -235,18 +238,20 @@ final class GraphEditorModel: ObservableObject {
         case .output: return "hardware output"
         case .tap: return "process tap"
         case .recorder: return "capture to disk"
+        case .bus: return "summing bus"
         }
     }
 
     // MARK: Geometry (canvas/model space)
 
-    func portCenter(_ id: NodeID) -> CGPoint? {
-        guard let o = positions[id], let d = descByID[id] else { return nil }
-        return GraphGeom.portCenter(origin: o, isSource: d.isSource)
+    /// A node's output port (`source: true`, right edge) or input port (left edge), if it has one.
+    func portCenter(_ id: NodeID, source: Bool) -> CGPoint? {
+        guard let o = positions[id], let d = descByID[id], source ? d.kind.isSource : d.kind.isSink else { return nil }
+        return GraphGeom.portCenter(origin: o, isSource: source)
     }
 
     func edgeEndpoints(_ e: BusEdge) -> (from: CGPoint, to: CGPoint)? {
-        guard let a = portCenter(e.from), let b = portCenter(e.to) else { return nil }
+        guard let a = portCenter(e.from, source: true), let b = portCenter(e.to, source: false) else { return nil }
         return (a, b)
     }
 
@@ -259,21 +264,32 @@ final class GraphEditorModel: ObservableObject {
         if changed { scheduleSave() }
     }
 
+    private func isBus(_ n: GNode) -> Bool { if case .bus = n.kind { return true } else { return false } }
+
     private func placeNew(_ n: GNode) -> CGPoint {
         if let p = pendingPlacement { pendingPlacement = nil; return p }   // right-click add: drop at the cursor
+        if isBus(n) {
+            // A bus sits between the columns; drop it below everything so it overlaps nothing.
+            let bottom = gnodes.filter { $0.id != n.id }.compactMap { positions[$0.id]?.y }.max()
+            return CGPoint(x: 232, y: (bottom ?? 36) + GraphGeom.nodeHeight + 20)
+        }
         let x: CGFloat = n.isSource ? 64 : 400
         let bottom = gnodes
-            .filter { $0.isSource == n.isSource && $0.id != n.id }
+            .filter { $0.isSource == n.isSource && !isBus($0) && $0.id != n.id }
             .compactMap { peer in positions[peer.id].map { $0.y } }
             .max()
         return CGPoint(x: x, y: (bottom ?? 36) + GraphGeom.nodeHeight + 20)
     }
 
+    /// Sources left, sinks right; with buses on the canvas, three columns with the buses in the middle.
     func autoArrange() {
-        let leftX: CGFloat = 64, rightX: CGFloat = 400, topY: CGFloat = 56, gap: CGFloat = GraphGeom.nodeHeight + 20
-        let sources = gnodes.filter { $0.isSource }.sorted(by: nodeOrder)
+        let buses = gnodes.filter(isBus).sorted(by: nodeOrder)
+        let leftX: CGFloat = buses.isEmpty ? 64 : 40, midX: CGFloat = 300, rightX: CGFloat = buses.isEmpty ? 400 : 560
+        let topY: CGFloat = 56, gap: CGFloat = GraphGeom.nodeHeight + 20
+        let sources = gnodes.filter { $0.isSource && !isBus($0) }.sorted(by: nodeOrder)
         let sinks = gnodes.filter { !$0.isSource }.sorted(by: nodeOrder)
         for (i, n) in sources.enumerated() { positions[n.id] = CGPoint(x: leftX, y: topY + CGFloat(i) * gap) }
+        for (i, n) in buses.enumerated() { positions[n.id] = CGPoint(x: midX, y: topY + CGFloat(i) * gap) }
         for (i, n) in sinks.enumerated() { positions[n.id] = CGPoint(x: rightX, y: topY + CGFloat(i) * gap) }
         pan = .zero
         scheduleSave()
@@ -302,11 +318,12 @@ final class GraphEditorModel: ObservableObject {
     func addInputAtCursor(_ d: AudioDevice)  { pendingPlacement = originForSpawn(); app.addInputNode(d) }
     func addTapAtCursor(_ a: TappableApp)    { pendingPlacement = originForSpawn(); app.addTapNode(a) }
     func addRecorder(atCursor: Bool)         { if atCursor { pendingPlacement = originForSpawn() }; app.addRecorderNode() }
+    func addBus(atCursor: Bool)              { if atCursor { pendingPlacement = originForSpawn() }; app.addBusNode() }
 
     private func nodeOrder(_ a: GNode, _ b: GNode) -> Bool {
         func rank(_ n: GNode) -> Int {
             if n.isPermanent { return 0 }
-            switch n.kind { case .input, .output: return 1; case .tap: return 2; default: return 3 }
+            switch n.kind { case .input, .output: return 1; case .tap: return 2; case .bus: return 4; default: return 3 }
         }
         if rank(a) != rank(b) { return rank(a) < rank(b) }
         return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
@@ -428,8 +445,8 @@ final class GraphEditorModel: ObservableObject {
 
     private func nearestNode(to point: CGPoint, wantSource: Bool, maxDist: CGFloat) -> NodeID? {
         var best: (NodeID, CGFloat)?
-        for n in gnodes where n.isSource == wantSource {
-            guard let c = portCenter(n.id) else { continue }
+        for n in gnodes where wantSource ? n.kind.isSource : n.kind.isSink {
+            guard let c = portCenter(n.id, source: wantSource) else { continue }
             let d = hypot(c.x - point.x, c.y - point.y)
             if d <= maxDist, best == nil || d < best!.1 { best = (n.id, d) }
         }

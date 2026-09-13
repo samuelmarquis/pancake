@@ -456,6 +456,23 @@ final class AppModel: ObservableObject {
     func addInputNode(_ d: AudioDevice) { addNode(.input(d.uid, label: d.name)) }
     func addTapNode(_ a: TappableApp) { addNode(.tap(a.bundleID, label: a.name)) }
     func addRecorderNode() { addNode(.recorder()) }
+    func addBusNode() {
+        let n = graph.nodes.filter { if case .bus = $0.kind { return true } else { return false } }.count + 1
+        addNode(.bus(label: "Bus \(n)"))
+    }
+
+    // MARK: Buses
+
+    /// Set a bus's processing (compressor, trim). Not topology, so the engine hot-swaps the matrix.
+    func setBusParams(_ id: NodeID, _ p: BusParams) {
+        var g = graph
+        guard g.node(id) != nil, g.busParams(id) != p else { return }
+        g.setBusParams(id, p)
+        applyEditedGraph(g)
+    }
+
+    /// Live meter for a bus node: compressor gain reduction (dB, ≤ 0) and post-processing peak.
+    func busMeter(_ id: NodeID) -> (gainReduction: Float, peak: Float) { engine.busMeter(id) }
 
     // MARK: Recording (a .recorder node captures whatever's wired into it to a file)
 
