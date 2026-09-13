@@ -33,16 +33,25 @@ struct MenuContent: View {
                 EmptyRow(text: "No output devices")
             }
             ForEach(model.menuOutputs) { item in
-                MenuRow(action: { model.select(item) }) {
-                    DeviceLabel(glyph: Self.outputGlyph(item),
-                                name: item.name,
-                                subtitle: item.present ? nil : "not connected",
-                                battery: item.battery,
-                                selected: item.uid == model.desiredOutputUID,
-                                dimmed: !item.present,
-                                trailing: (!item.present && item.isBluetooth) ? "arrow.clockwise" : nil)
+                if !item.present && item.isBluetooth {
+                    // Absent Bluetooth: a real reconnect button, not a decorative icon on a row whose
+                    // whole width quietly does the same thing.
+                    ReconnectRow(item: item,
+                                 glyph: Self.outputGlyph(item),
+                                 selected: item.uid == model.desiredOutputUID,
+                                 action: { model.reconnect() })
+                } else {
+                    MenuRow(action: { model.select(item) }) {
+                        DeviceLabel(glyph: Self.outputGlyph(item),
+                                    name: item.name,
+                                    subtitle: item.present ? nil : "not connected",
+                                    battery: item.battery,
+                                    selected: item.uid == model.desiredOutputUID,
+                                    dimmed: !item.present,
+                                    trailing: nil)
+                    }
+                    .disabled(!item.present)
                 }
-                .disabled(!item.present && !item.isBluetooth)
             }
 
             Divider().padding(.vertical, 2)
@@ -190,6 +199,47 @@ private struct MenuRow<Label: View>: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+    }
+}
+
+/// An absent Bluetooth output rendered as an actual reconnect button: it highlights on hover, the
+/// icon spins on click, and the subtitle flips to "reconnecting…" for a beat — so the click clearly
+/// registers. Reconnect is best-effort (a paired phone may be holding the AirPods), so this shows the
+/// request went out; whether they come back is up to Bluetooth.
+private struct ReconnectRow: View {
+    let item: MenuOutput
+    let glyph: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hover = false
+    @State private var spins = 0
+    @State private var reconnecting = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.7)) { spins += 1 }
+            reconnecting = true
+            action()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { reconnecting = false }
+        } label: {
+            HStack(spacing: 0) {
+                DeviceLabel(glyph: glyph, name: item.name,
+                            subtitle: reconnecting ? "reconnecting…" : "not connected",
+                            battery: item.battery, selected: selected, dimmed: true, trailing: nil)
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(hover ? Color.accentColor : Color.secondary)
+                    .rotationEffect(.degrees(Double(spins) * 360))
+                    .padding(.trailing, 4)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(hover ? Color.primary.opacity(0.10) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Reconnect \(item.name)")
     }
 }
 
