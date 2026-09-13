@@ -63,7 +63,8 @@ struct Status: ParsableCommand {
         let plugIns = HALHealth.plugInBundleIDs()
         let dupes = HALHealth.duplicatePlugIns(in: plugIns)
         if dupes.isEmpty {
-            print("coreaudiod plug-ins:   \(plugIns.count) registered, no duplicates")
+            let unreadable = plugIns.filter { $0 == nil }.count
+            print("coreaudiod plug-ins:   \(plugIns.count) registered, no duplicates" + (unreadable > 0 ? " (\(unreadable) not yet readable — coreaudiod still starting?)" : ""))
         } else {
             print("coreaudiod plug-ins:   \(plugIns.count) registered — WARNING: " +
                   dupes.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }.joined(separator: ", "))

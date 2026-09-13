@@ -5,10 +5,11 @@ import Foundation
 /// machine's audio slow, and that pancake's own development workflow can provoke.
 public enum HALHealth {
     /// Bundle ids of every HAL plug-in coreaudiod currently has registered, in list order. One entry
-    /// per registration — a plug-in registered twice appears twice.
-    public static func plugInBundleIDs() -> [String] {
+    /// per registration — a plug-in registered twice appears twice. nil where the bundle id can't be
+    /// read: normal for a second or so while coreaudiod is still bringing plug-ins up after a restart.
+    public static func plugInBundleIDs() -> [String?] {
         let ids = (try? systemAudioObject.getPropertyArray(.init(kAudioHardwarePropertyPlugInList), of: AudioObjectID.self)) ?? []
-        return ids.map { (try? $0.getPropertyString(.init(kAudioPlugInPropertyBundleID))) ?? "?" }
+        return ids.map { try? $0.getPropertyString(.init(kAudioPlugInPropertyBundleID)) }
     }
 
     /// Plug-ins registered more than once, with their counts. Healthy is empty.
@@ -18,9 +19,13 @@ public enum HALHealth {
     /// coreaudiod; weeks of them push the count into the millions and coreaudiod pins the CPU. Seen
     /// 2026-09-13. The cure is `sudo killall AirPlayXPCHelper coreaudiod` (both at once), which
     /// `make install-driver` now does on every install.
-    public static func duplicatePlugIns(in bundleIDs: [String]) -> [String: Int] {
+    ///
+    /// Unreadable entries (nil) are ignored, not counted as one repeated "unknown" plug-in: right after a
+    /// coreaudiod restart several plug-ins briefly can't report their bundle id, and counting those raised
+    /// a false "×7" alarm (seen during the first verification of this check).
+    public static func duplicatePlugIns(in bundleIDs: [String?]) -> [String: Int] {
         var counts: [String: Int] = [:]
-        for b in bundleIDs { counts[b, default: 0] += 1 }
+        for case let b? in bundleIDs { counts[b, default: 0] += 1 }
         return counts.filter { $0.value > 1 }
     }
 

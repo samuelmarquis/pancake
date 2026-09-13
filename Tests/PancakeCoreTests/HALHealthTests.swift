@@ -8,6 +8,13 @@ import Testing
         #expect(HALHealth.describe([:]) == nil)
     }
 
+    /// Right after a coreaudiod restart several plug-ins can't report a bundle id yet. Those are not
+    /// duplicates of one "unknown" plug-in (the false ×7 alarm this guards against).
+    @Test func unreadableEntriesAreNotDuplicates() {
+        let list: [String?] = ["com.apple.audio.CoreAudio", nil, nil, nil, "com.pancake.driver", nil, nil, nil, nil]
+        #expect(HALHealth.duplicatePlugIns(in: list).isEmpty)
+    }
+
     /// The 2026-09-13 shape: AirPlayXPCHelper registered 32 times after five coreaudiod restarts.
     @Test func airPlayLeakIsReportedWithItsCount() {
         let list = ["com.apple.audio.CoreAudio"] + Array(repeating: "com.apple.AirPlayXPCHelper", count: 32) + ["com.pancake.driver"]

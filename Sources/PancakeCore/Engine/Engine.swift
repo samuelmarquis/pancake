@@ -754,14 +754,20 @@ public final class Engine {
     /// Log (once per change) if coreaudiod has plug-ins registered more than once — the AirPlayXPCHelper
     /// leak that doubles on every coreaudiod restart and eventually pins the CPU. Not pancake's state,
     /// but pancake's driver installs are what restart coreaudiod, so it's pancake's job to notice.
-    private func checkHALHealth() {
+    /// Returns true if the health picture changed. Also re-run from the watchdog every
+    /// `healthCheckEveryTicks` ticks, so a reading taken while coreaudiod was still starting can't latch.
+    @discardableResult
+    private func checkHALHealth() -> Bool {
         let dupes = HALHealth.duplicatePlugIns()
-        guard dupes != lastPlugInDuplicates else { return }
+        guard dupes != lastPlugInDuplicates else { return false }
         lastPlugInDuplicates = dupes
         updateSnapshot { $0.plugInDuplicates = dupes }
         if let msg = HALHealth.describe(dupes) { Log.warn(msg) }
         else { Log.info("coreaudiod plug-in registrations are back to normal (no duplicates)") }
+        return true
     }
+    private static let healthCheckEveryTicks = 6   // × watchdogInterval (5 s) = every 30 s
+    private var watchdogTicks = 0
 
     private func destroyAllTaps() {
         for (_, tap) in taps { tap.destroy() }
@@ -999,6 +1005,10 @@ public final class Engine {
     /// Periodic health check. Logs what the IOProc is doing and forces a rebuild if IO has
     /// stalled or the aggregate lost a sub-device without telling us.
     private func watchdogTick() {
+        watchdogTicks += 1
+        if watchdogTicks % Self.healthCheckEveryTicks == 0, checkHALHealth() {
+            onStateChange?(currentState)   // republish so the UI's warning follows
+        }
         guard case .running(let info) = currentState, let agg = aggregate, let layout else { return }
         let cycles = pk_context_cycles(rt)
         let hubPeak = layout.inputs[configuration.hubUID]?.first.map { pk_context_input_peak(rt, UInt32($0.buffer)) } ?? 0

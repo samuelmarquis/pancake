@@ -77,6 +77,13 @@ throughout; no process taps or pancake aggregates leaked.
   - Quit ran `engine.stop()` synchronously; with coreaudiod hung it never returned and the app had to be
     force-killed, skipping the default-output hand-back. Quit now waits at most 4 s, then exits.
 
+**Verified live (06:42):** `sudo make install-driver` restarted AirPlayXPCHelper and coreaudiod in the
+same second; `pancake status` then showed 14 plug-ins, no duplicates. The app logged `coreaudiod
+restarted; dropping 1 dead tap(s)`, recreated the Helium tap and was running again in 0.7 s, with no
+"HAL refused" warnings. That run also caught a false alarm in the new check — in coreaudiod's first
+second back, seven plug-ins couldn't report a bundle id and were counted as "? ×7" — so unreadable
+entries are now ignored and the check re-runs every 30 s so a bad reading can't latch.
+
 ## Still open
 
 - **Pancake can be left as the system default output with no engine running.** macOS keeps a
