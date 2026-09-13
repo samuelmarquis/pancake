@@ -25,14 +25,15 @@ switching output out from under you.
 
 ## What it does
 
-pancake installs three virtual audio devices and routes between them and your real
+pancake installs four virtual audio devices and routes between them and your real
 hardware:
 
 | Device | What it's for |
 |---|---|
 | **Pancake** | The system output. Apps play here; it carries the volume control (the volume keys drive it). |
 | **Pancake Mic** | A virtual input. Wire real mics and app audio into it; Discord/Zoom/etc. record it. |
-| **Pancake Program** | A silent bus the screen-share helper renders one chosen app into, so you can share *one app's* audio cleanly. |
+| **Pancake Program** | The screen-share bus. Wire anything into it — one app, several, your mic — and that mix is what a window-share of the Stage carries. |
+| **Pancake Stage** | The Stage's private render target (it plays Program back as its own output). You never touch it. |
 
 From the menu bar you get: an output picker (Control Center's picker works too —
 the engine follows it), a volume slider, input selection for Pancake Mic, output/
@@ -56,8 +57,10 @@ input locks, "Reconnect" for stolen Bluetooth, screen-share start/stop, and
 - **Add nodes** from the top bar or by right-clicking the canvas (drops at the
   cursor). Drag nodes around; **Tidy** snaps them to the grid.
 - **Screen share is part of the graph**: wire an app's tap → **Pancake Program**
-  and the helper streams that app. (Verified live: a Discord window-share of one
-  app's audio, friends heard it clearly, no echo.)
+  and the helper streams that app — or wire several apps, or your mic, each with
+  its own knob; the engine mixes them. One app can feed the stream, a recorder and
+  Discord's mic at once from a single tap. (Verified live: a Discord window-share
+  of one app's audio, friends heard it clearly, no echo.)
 - **Record anything to disk**: add a **Recorder** node and wire any source(s)
   into it — it has a record/stop button, a live timer, and a folder button to
   pick where the take lands (defaults to a timestamped `.wav` in `~/Music/Pancake`).
@@ -114,7 +117,7 @@ Sources/
     CoreAudio/     typed property access, device snapshots, aggregate devices, HAL listeners
     Graph/         Node / Link / Graph, JSON persistence, file watcher
     Engine/        aggregate build/teardown, channel layout, matrix compiler, the engine
-    Stage/         screen-share config + tappable-app discovery
+    Stage/         tappable-app discovery (shared by the menu and the graph palette)
   pancake/         the CLI
   PancakeApp/      the menu-bar app + the graph editor (SwiftUI)
   PancakeStage/    the faceless screen-share helper
@@ -125,7 +128,7 @@ tools/             standalone CoreAudio probes
 
 ## Scope
 
-**In:** three virtual devices, a graph-driven routing engine, a menu-bar output
+**In:** four virtual devices, a graph-driven routing engine, a menu-bar output
 switcher, per-app capture via process taps, single-app screen-share audio,
 recording to disk, hot-plug/Bluetooth survival, and the visual graph editor.
 

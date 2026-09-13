@@ -1,13 +1,16 @@
 # Pancake.driver
 
-The HAL plug-in (`AudioServerPlugIn`) that gives the system two virtual devices:
+The HAL plug-in (`AudioServerPlugIn`) that gives the system four virtual devices:
 
 | Device | UID | Role | Controls |
 |---|---|---|---|
 | **Pancake** | `Pancake_UID` | The system output. Apps play here; the engine reads it back. | Output volume + mute — the volume keys drive this, and it's applied once, in the driver. |
 | **Pancake Mic** | `PancakeMic_UID` | The engine writes here; apps (Discord…) record from it. | None. Unity gain, always. |
+| **Pancake Program** | `PancakeProgram_UID` | The screen-share bus: the engine writes here, the Stage reads it. `CanBeDefault* = false`. | None. |
+| **Pancake Stage** | `PancakeStage_UID` | The Stage's render target: it plays Program into this as its own process output. `CanBeDefault* = false`. | None. |
 
-Both are stereo, Float32, 44.1/48/88.2/96 kHz, and share one host-time clock.
+All are stereo, Float32, 44.1/48/88.2/96 kHz, on one host-time clock, each with its own
+ring buffer (`pancake_device_index`).
 
 ## Provenance
 

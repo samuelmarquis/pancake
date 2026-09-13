@@ -54,8 +54,12 @@ struct Status: ParsableCommand {
         print("default output:        \(name(AudioDevice.defaultOutputID))")
         print("default system output: \(name(AudioDevice.defaultSystemOutputID))")
         print("default input:         \(name(AudioDevice.defaultInputID))")
-        let hub = AudioDevice.find(uid: "Pancake_UID"), mic = AudioDevice.find(uid: "PancakeMic_UID")
-        print("Pancake.driver:        \(hub != nil ? "loaded (\(hub!.name))" : "NOT loaded") \(mic != nil ? "+ Pancake Mic" : "")")
+        let hub = AudioDevice.find(uid: "Pancake_UID")
+        let others = ["PancakeMic_UID", "PancakeProgram_UID", "PancakeStage_UID"].compactMap { AudioDevice.find(uid: $0)?.name }
+        print("Pancake.driver:        \(hub != nil ? "loaded (\(hub!.name))" : "NOT loaded")\(others.isEmpty ? "" : " + " + others.joined(separator: ", "))")
+        if hub != nil, others.count < 3 {
+            print("                       (missing \(3 - others.count) device(s) — the installed driver is older than this build; sudo make install-driver)")
+        }
         print("graph file:            \(config.store.url.path) \(FileManager.default.fileExists(atPath: config.store.url.path) ? "" : "(missing)")")
         if let g = try? config.store.load() {
             print("graph outputs:         \(g.hubOutputDeviceUIDs)")

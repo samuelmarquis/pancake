@@ -46,6 +46,20 @@ import Testing
         #expect(back == g)
     }
 
+    @Test func programNodeRoundTripsAndIsASink() throws {
+        var g = Graph.stereoOutput("dev-a")
+        g.upsert(.program)
+        g.upsert(.tap("com.example.app", label: "App"))
+        g.connect(Port("tap:com.example.app", 0), Port(Graph.programID, 0))
+        g.connect(Port("tap:com.example.app", 1), Port(Graph.programID, 1))
+        #expect(!NodeKind.program.isSource)
+        #expect(NodeKind.program.deviceUID == nil, "program is a fixed bus, not a graph-referenced device")
+        #expect(g.programSourceNodeIDs == ["tap:com.example.app"])
+        let text = try g.jsonString()
+        #expect(text.filter { $0 != " " && $0 != "\n" }.contains(#""type":"program""#), Comment(rawValue: text))
+        #expect(try Graph(jsonString: text) == g)
+    }
+
     @Test func missingGainDecodesAsUnity() throws {
         let json = #"{"nodes":[{"id":"hub","kind":{"type":"hub"}},{"id":"out:x","kind":{"type":"output","device":"x"}}],"links":[{"from":{"node":"hub","channel":0},"to":{"node":"out:x","channel":0}}]}"#
         let g = try Graph(jsonString: json)

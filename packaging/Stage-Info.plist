@@ -27,6 +27,6 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Pancake Stage captures the audio of the app you choose to share so your friends hear it cleanly. It does not record you.</string>
+	<string>Pancake Stage reads the Pancake Program bus (what you chose to share in the graph) so your friends hear it cleanly. It does not record you.</string>
 </dict>
 </plist>

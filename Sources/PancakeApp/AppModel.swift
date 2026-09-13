@@ -43,9 +43,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var hubMuted: Bool = false
     @Published private(set) var state: Engine.State = .stopped
 
-    // Pancake Stage (clean Discord screen-share) — driven via the stage.json IPC. The Stage process
-    // watches the same file and obeys; this is just a second thin view over it.
-    @Published private(set) var stageConfig = StageConfig()
+    // Pancake Stage (clean Discord screen-share). It has no configuration: the menu launches and quits
+    // the process, and *what* it shares is whatever the graph wires into the Pancake Program node.
     @Published private(set) var stageRunning = false
     @Published private(set) var stageApps: [TappableApp] = []
     static let stageBundleID = "com.pancake.stage"
@@ -61,8 +60,6 @@ final class AppModel: ObservableObject {
     private let queue = DispatchQueue(label: "com.pancake.app")
     private var monitor: HardwareMonitor?
     private var watcher: FileWatcher?
-    private let stageStore = StageStore()
-    private var stageWatcher: FileWatcher?
     private var workspaceObservers: [NSObjectProtocol] = []
     /// Listeners on Pancake's volume/mute so the slider tracks the hardware keys live.
     private var hubVolumeListeners: [PropertyListener] = []
@@ -72,7 +69,10 @@ final class AppModel: ObservableObject {
         Log.minimumLevel = .debug   // bring-up: the watchdog's health lines are the evidence we need
         Log.info("pancake app starting (pid \(ProcessInfo.processInfo.processIdentifier))")
 
-        let loaded = (try? store.load()) ?? Graph()
+        var loaded = (try? store.load()) ?? Graph()
+        if Self.migrateLegacyStageConfig(into: &loaded) {
+            do { try store.save(loaded) } catch { Log.warn("save migrated graph: \(error)") }
+        }
         graph = loaded
         engine = Engine(graph: loaded)
 
@@ -93,12 +93,6 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.graphFileChanged(g) }
         }
 
-        stageConfig = (try? stageStore.load()) ?? StageConfig()
-        let stageStore = self.stageStore
-        stageWatcher = stageStore.watch(queue: queue) { [weak self] in
-            guard let cfg = try? stageStore.load() else { return }
-            Task { @MainActor in self?.stageConfigFileChanged(cfg) }
-        }
         observeStageLifecycle()
         refreshLaunchAtLogin()
 
@@ -242,16 +236,42 @@ final class AppModel: ObservableObject {
 
     // MARK: Stage (screen share)
 
-    /// The app the Stage is set to render, as a friendly name (for the menu label).
-    var stageAppName: String? {
-        guard let bid = stageConfig.bundleID else { return nil }
-        return stageApps.first { $0.bundleID == bid }?.name ?? bid
+    /// What the screen share carries — the nodes wired into Pancake Program — as friendly names.
+    var programSourceNames: [String] {
+        graph.programSourceNodeIDs.compactMap { id -> String? in
+            guard let n = graph.node(id) else { return nil }
+            switch n.kind {
+            case .hub: return "Pancake"
+            case .tap(let b): return n.label ?? stageApps.first { $0.bundleID == b }?.name ?? b
+            default: return n.label ?? id.rawValue
+            }
+        }
     }
 
-    func setStageApp(_ bundleID: String?) {
-        stageConfig.bundleID = bundleID
-        saveStage()
-        Log.info("menu: stage app → \(bundleID ?? "none")")
+    /// Before the engine owned every tap, the Stage tapped the shared app itself, chosen through a
+    /// separate `stage.json`. That file is now meaningless (the Stage just plays the Program bus);
+    /// fold its choice into the graph as `tap → program` once, then delete it. Returns true if the
+    /// graph changed.
+    private static func migrateLegacyStageConfig(into g: inout Graph) -> Bool {
+        let url = GraphStore.defaultURL.deletingLastPathComponent().appendingPathComponent("stage.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let bundleID = obj["bundleID"] as? String, !bundleID.isEmpty else {
+            Log.info("legacy stage.json had no app chosen; removed")
+            return false
+        }
+        let tap = Node.tap(bundleID, label: g.node(Node.tap(bundleID).id)?.label
+                           ?? NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID }?.localizedName)
+        g.upsert(.program)
+        if g.node(tap.id) == nil { g.upsert(tap) }
+        if !g.links.contains(where: { $0.from.node == tap.id && $0.to.node == Graph.programID }) {
+            g.connect(Port(tap.id, 0), Port(Graph.programID, 0))
+            g.connect(Port(tap.id, 1), Port(Graph.programID, 1))
+        }
+        Log.info("migrated legacy stage.json: \(bundleID) → Pancake Program is now a graph wire; file removed")
+        return true
     }
 
     func startStage() {
@@ -277,15 +297,6 @@ final class AppModel: ObservableObject {
 
     /// Re-read who's running and which apps are tappable (call when the menu opens).
     func refreshStage() { refreshStageState() }
-
-    private func saveStage() {
-        do { try stageStore.save(stageConfig) } catch { Log.warn("save stage config: \(error)") }
-    }
-
-    private func stageConfigFileChanged(_ cfg: StageConfig) {
-        guard cfg != stageConfig else { return }   // our own save coming back around
-        stageConfig = cfg
-    }
 
     private func observeStageLifecycle() {
         refreshStageState()
@@ -398,18 +409,13 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    /// The two fixed buses may not be named in the graph yet; make sure an endpoint exists before wiring it.
+    /// The fixed buses may not be named in the graph yet; make sure an endpoint exists before wiring it.
     private func ensureNode(_ g: inout Graph, _ id: NodeID) {
         guard g.node(id) == nil else { return }
         if id == Graph.hubID { g.upsert(.hub) }
         else if id == Graph.micID { g.upsert(.mic) }
-        else if id.rawValue.hasPrefix("tap:") {
-            // A tap that exists only as the screen-share source (synthesized from stage.json) can be
-            // wired into the audio graph too; materialize it here from its id.
-            let b = String(id.rawValue.dropFirst("tap:".count))
-            g.upsert(.tap(b, label: stageApps.first { $0.bundleID == b }?.name))
-        }
-        // Device nodes are added through the palette with labels, so they already exist.
+        else if id == Graph.programID { g.upsert(.program) }
+        // Every other node is added through the palette with a label, so it already exists.
     }
 
     /// Wire one bus between two nodes: replace every existing link between the pair with the given

@@ -52,19 +52,29 @@ in ~4.6k lines of C. **It is GPL-3.0, not MIT** — fine for a personal tool, an
 driver sits behind a process boundary (it runs inside `coreaudiod`; the engine only
 talks HAL to it), so `Sources/` stays unencumbered. Forked as `driver/Pancake.c`.
 
-### Two devices, not one
+### Four devices, not one
 
 The Discord case ("they should hear Ableton, not themselves") needs a virtual
 *microphone* whose content the graph decides — not a mirror of the system output.
-So the driver exposes two independent loopback devices:
+So the driver exposes independent loopback devices — four of them by now:
 
 | Device | UID | Graph role |
 |---|---|---|
 | **Pancake** | `Pancake_UID` | `hub` — apps play here, the engine reads it. System default output. |
 | **Pancake Mic** | `PancakeMic_UID` | `mic` — the engine writes here, apps record from it. |
+| **Pancake Program** | `PancakeProgram_UID` | `program` — the engine writes here; the Stage plays it back as its own output, which is what a window-share of the Stage carries. |
+| **Pancake Stage** | `PancakeStage_UID` | (not in the graph) the Stage's private render target, so its playback of Program isn't fed back into Program. |
 
 BlackHole already has a second device ("Mirror"), but it shares the first one's
 ring buffer. The fork gives each device its own; that's the one substantive change.
+Program and Stage came later, for screen-share, and are the same clone again.
+
+Why doesn't the Stage capture the shared app itself? It did at first. But a Core
+Audio process tap is exclusive in practice: two taps on the same app fight and one
+goes silent, so the moment the graph also tapped that app (into a recorder, or the
+mic) the stream went quiet. One owner for every tap — the engine — and the Stage
+reduced to a repeater is the only arrangement where "share it *and* record it *and*
+send it to Discord's mic" is just three wires from one node.
 
 ### It must expose a volume control — on Pancake only
 
@@ -93,7 +103,9 @@ Node  = hub                           // "Pancake": what apps played (source)
       | mic                           // "Pancake Mic": what apps can record (sink)
       | input(deviceUID)              // physical input (source)
       | output(deviceUID)             // physical output (sink)
-      | tap(bundleID)                 // per-app capture, macOS 14.2+ (source; M5)
+      | tap(bundleID)                 // per-app capture, macOS 14.2+ (source)
+      | program                       // "Pancake Program": the screen-share bus (sink)
+      | recorder(id)                  // capture-to-disk (sink; not a device)
 
 Link  = { from: (Node, channel), to: (Node, channel), gain: Float = 1 }
 ```

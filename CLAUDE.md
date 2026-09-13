@@ -46,19 +46,32 @@ Foundation-needing helpers in `PancakeCore` instead (see `Graph.jsonString()`).
 
 ## Architecture in one breath
 
-`driver/Pancake.c` (GPL fork of BlackHole) gives the system three virtual devices: **Pancake**
+`driver/Pancake.c` (GPL fork of BlackHole) gives the system four virtual devices: **Pancake**
 (`Pancake_UID`, the default output, has the volume control), **Pancake Mic**
-(`PancakeMic_UID`, what Discord records, no controls), and **Pancake Program**
-(`PancakeProgram_UID`, a controls-free silent sink the Stage renders the shared program into —
-reports `CanBeDefault* = false` so the system never picks it). All three are
-`kObjectID_Device`/`Device2`/`Device3`, each keyed to its own ring buffer via
-`pancake_device_index` (`gRingBuffer[0|1|2]`); adding a fourth means cloning the `Device3`
-footprint (see `tools/`-style transform history / `git log`). `Engine` builds one private aggregate
+(`PancakeMic_UID`, what Discord records, no controls), **Pancake Program**
+(`PancakeProgram_UID`, the screen-share bus: a controls-free silent sink the *engine* mixes into,
+`NodeKind.program` in the graph), and **Pancake Stage** (`PancakeStage_UID`, the Stage's private
+render target — it plays Program back into this as its own process output). Program and Stage
+report `CanBeDefault* = false` so the system never picks them. They're
+`kObjectID_Device`/`Device2`/`Device3`/`Device4`, each keyed to its own ring buffer via
+`pancake_device_index` (`gRingBuffer[0…3]`); adding a fifth means cloning the `Device4` footprint
+(`git show` the Device4 commit — it was applied by a self-checking transform that asserts every
+edit's match count). `Engine` builds one private aggregate
 device out of the hub + every device the graph references (real hardware as clock master,
 drift compensation on the rest), installs one IOProc (`pk_ioproc`, C, no allocation/locks),
 and the IOProc applies a `pk_matrix` of routes — `out[b][c] += in[b][c] * gain` — swapped in
 atomically. `Graph` is the desired state (JSON at `~/.config/pancake/graph.json`); the engine
 derives an effective graph per rebuild. The file is the IPC: CLI/UI write it, engine watches it.
+
+**The engine owns every process tap — one per app, ever.** Two Core Audio taps on the same process
+family fight and one goes silent (seen live: the Stage's tap of Helium was starved the moment the
+engine also tapped Helium for a recorder; whichever tap was created last won, which is why "it worked
+after a restart"). So nothing else in pancake creates taps: the Stage is a dumb repeater (Program →
+Stage device), and one tap fans out to the recorder, the mic and Program as the graph wires it. A tap
+follows its app's processes *in place* (`ProcessTap.update` sets `kAudioTapPropertyDescription` on
+the live tap, same UUID, so the aggregate never notices): helpers spawning, the app quitting and
+relaunching — no rebuild, no glitch. Only "an app we wanted but couldn't tap is now running" rebuilds.
+The engine listens to `kAudioHardwarePropertyProcessObjectList` for all of this.
 
 **Recorders** are sink nodes that aren't devices (`NodeKind.recorder`). A route whose `out_buffer`
 carries `PK_REC_FLAG` targets a `pk_context` recorder slot instead of an aggregate output stream; the
@@ -123,25 +136,24 @@ because the ring lives in the context, not the matrix.
 - iOS steals the AirPods regardless of our running IOProc. Can't be prevented from this side.
 - App end-to-end: Music → Pancake → aggregate → AirPods, audible, once the Microphone grant is in place.
 - **Three-bus streaming, verified live (2026-09-12).** `Pancake Program` (`PancakeProgram_UID`,
-  `kObjectID_Device3`, a controls-free silent loopback — the Stage renders the shared app into it)
-  works end to end. With the Stage tapping Ableton, `pancake probe-aggregate "Pancake Program"`
-  read peaks ~1.0 while `"Pancake Mic"` read ~0.003 (no bleed); a live Discord *window*-share of the
-  Stage got "green on both" — friends heard Ableton clearly, no echo. Stage renders into Program
-  (not Pancake Mic). Adding Program did NOT churn the engine — it logged `devices changed: same set,
-  ignoring` (Program isn't graph-relevant). (A later review fixed two *latent* driver bugs —
-  `kAudioPlugInPropertyTranslateUIDToDevice` omitted Device3, and a dead ControlList copy-paste;
-  both off the live path. Committed but not yet installed — `sudo make install-driver` at convenience.)
+  `kObjectID_Device3`, a controls-free silent loopback) works end to end: with Ableton rendered into
+  it, `pancake probe-aggregate "Pancake Program"` read peaks ~1.0 while `"Pancake Mic"` read ~0.003
+  (no bleed); a live Discord *window*-share of the Stage got "green on both" — friends heard Ableton
+  clearly, no echo. (That verification was with the Stage tapping Ableton itself; the tap has since
+  moved into the engine — see "The engine owns every process tap" above — and the Stage now reads
+  Program and renders it into the fourth device, **Pancake Stage** (`PancakeStage_UID`,
+  `kObjectID_Device4`). The repeater path needs the Device4 driver installed: `sudo make
+  install-driver`; the Stage logs `no stage device` and retries on the next devices-changed until it is.)
 - **Stage is a faceless, menu-driven helper, verified live (2026-09-12).** It's an `.accessory` app
-  (no Dock icon, no control panel): one chrome-free mirror window, **always parked off-desktop** at a
-  1pt on-screen sliver — invisible to you but still composited and listed in Discord's window picker
-  (Discord lists it by its `.titled` title; `canJoinAllSpaces` keeps it on Discord's current desktop;
-  it matches the display's aspect so there are no letterbox bars). The menu bar's **Screen share**
-  section is just start/stop + status now; the **source** (which app is streamed) is chosen in the
-  graph — wire an app's process-tap node to the **Pancake Program** node (see the graph window). Both
-  write `~/.config/pancake/stage.json` (`StageConfig`); the Stage watches that file and reconciles its
-  tap — the file is the IPC, same pattern as the graph. A preferred app (Ableton) is auto-tapped the
-  moment it becomes tappable (a `kAudioHardwarePropertyProcessObjectList` listener), one-shot until you
-  choose otherwise. Quit it via the menu's **Stop screen share** or `make stop-stage`.
+  (no Dock icon, no control panel, **no configuration**): one chrome-free mirror window, **always
+  parked off-desktop** at a 1pt on-screen sliver — invisible to you but still composited and listed in
+  Discord's window picker (Discord lists it by its `.titled` title; `canJoinAllSpaces` keeps it on
+  Discord's current desktop; it matches the display's aspect so there are no letterbox bars). The menu
+  bar's **Screen share** section is start/stop + what's being shared; the **source** is the graph —
+  wire anything (app taps, the hub, a mic, each with its own knob) into the **Pancake Program** node
+  and the engine mixes it there. There is no `stage.json` any more (an old one is folded into the
+  graph as `tap → program` on the app's next launch, then deleted). Quit the Stage via the menu's
+  **Stop screen share** or `make stop-stage`.
 - The AirPods' *own* hardware volume (elements 1+2, no element 0) is rewritten by the iPhone when it
   steals them; with Pancake as the default output the volume keys drive Pancake, so that hidden gain
   just makes everything quiet (found at 0.5). `swift tools/setvol.swift AA-BB-CC-DD-EE-FF:output 1.0`
@@ -153,6 +165,16 @@ because the ring lives in the context, not the matrix.
   family (`<bundle>` + `<bundle>.*`), and `tappableApps()` hides helpers whose parent app is listed (and
   the ● "playing" dot reflects any family member). Proven: `pancake record --source tap:com.hnc.Discord`
   captured Discord at −2.4 dBFS while its audio came from `…helper.Renderer` (old code → silence).
+  That fix is also what *exposed* the two-tap conflict (both taps used to be silent for this reason,
+  so they never visibly fought): with the engine tapping Helium for a recorder and the Stage tapping
+  it for the share, `probe-aggregate "Pancake Program"` read 0.000 while the app ran and 0.888 the
+  moment it was stopped. Hence "the engine owns every tap".
+- **Taps follow their app in place, verified live (2026-09-13).** CLI engine with
+  `tap:com.apple.QuickTimePlayerX → mic`, QuickTime playing a −54 dBFS tone: `probe-aggregate "Pancake
+  Mic"` read 0.002; quit QuickTime → *no rebuild*, Mic read 0.000; relaunch → log `now capturing 1
+  process(es) (in place)`, still no rebuild, Mic read 0.002 again. The in-place
+  `kAudioTapPropertyDescription` update works on macOS 26.3. (A scratch app that never registers with
+  LaunchServices shows up as a HAL process with an *empty* bundle id — use a real bundled app to test.)
 - **Recorder, verified live (2026-09-12).** `pancake record --seconds 6` of the hub while a sound
   played wrote a valid 2ch/48k/24-bit WAV, 6.005 s, peak −28.9 dBFS. The RT ring is also covered by a
   sample-exact unit test (`RecorderRingTests`) that pumps known audio through `pk_ioproc` and reads it
@@ -193,9 +215,9 @@ because the ring lives in the context, not the matrix.
    (drops the node at the cursor); drag nodes, pan the canvas, **Tidy** snaps every node onto the dot
    grid (it aligns, it doesn't re-column). Edits apply to the engine at once and persist to `graph.json`;
    **node positions live in a separate `~/.config/pancake/graph-layout.json`** so the IPC stays clean.
-   **Screen-share is integrated**: the **Pancake Program** node is the stream bus; wiring an app tap →
-   Program sets the Stage's source (backed by `stage.json`, *not* the graph, so the engine never
-   double-taps). Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
+   **Screen-share is integrated**: the **Pancake Program** node is a real sink (`NodeKind.program`,
+   mirror of `mic`); whatever you wire into it is what the stream carries, and the engine does the
+   mixing. Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
    (its legend drops out when the window is narrow); the window opens fitting a tidied graph and shrinks
    much smaller. Remaining polish if wanted: zoom, multi-select, marquee.
 

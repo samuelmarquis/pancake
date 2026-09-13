@@ -326,7 +326,9 @@ private struct StageSection: View {
             .padding(.top, 2)
 
             if model.stageRunning {
-                Text("Sharing \(model.stageAppName ?? "no app") · pick the source in the graph")
+                Text(model.programSourceNames.isEmpty
+                     ? "Sharing silence · wire sources into Pancake Program in the graph"
+                     : "Sharing \(model.programSourceNames.joined(separator: " + "))")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                 MenuRow(action: { model.stopStage() }) { ActionLabel("Stop screen share", "stop.circle") }

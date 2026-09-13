@@ -24,16 +24,21 @@ public enum NodeKind: Hashable, Codable {
     case input(deviceUID: String)
     /// A physical output device. Sink.
     case output(deviceUID: String)
-    /// A per-process tap (macOS 14.2+). Source. Reserved for M5; the engine ignores it today.
+    /// A per-process tap (macOS 14.2+): an app's output audio, captured by bundle id. Source. The
+    /// engine owns every tap — one per app, fanned to as many sinks as the graph wires it to.
     case tap(bundleID: String)
     /// A capture-to-disk sink. Not a device — the engine mixes what's wired in into a ring and a
     /// drain thread writes it to a file. `id` is a stable identifier so multiple recorders persist.
     case recorder(id: String)
+    /// "Pancake Program" — the screen-share bus. A *sink*: the engine mixes whatever is wired into
+    /// it (app taps, the hub, a mic…) onto this silent virtual device, and the Stage plays it back
+    /// as its own process output so a window-share of the Stage carries exactly this mix.
+    case program
 
     public var isSource: Bool {
         switch self {
         case .hub, .input, .tap: return true
-        case .mic, .output, .recorder: return false
+        case .mic, .output, .recorder, .program: return false
         }
     }
     public var isSink: Bool { !isSource }
@@ -42,7 +47,7 @@ public enum NodeKind: Hashable, Codable {
     public var deviceUID: String? {
         switch self {
         case .input(let uid), .output(let uid): return uid
-        case .hub, .mic, .tap, .recorder: return nil
+        case .hub, .mic, .tap, .recorder, .program: return nil
         }
     }
 
@@ -60,6 +65,7 @@ public enum NodeKind: Hashable, Codable {
         case "output": self = .output(deviceUID: try c.decode(String.self, forKey: .device))
         case "tap": self = .tap(bundleID: try c.decode(String.self, forKey: .bundle))
         case "recorder": self = .recorder(id: try c.decode(String.self, forKey: .id))
+        case "program": self = .program
         default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown node type \(type)")
         }
     }
@@ -73,6 +79,7 @@ public enum NodeKind: Hashable, Codable {
         case .output(let uid): try c.encode("output", forKey: .type); try c.encode(uid, forKey: .device)
         case .tap(let b): try c.encode("tap", forKey: .type); try c.encode(b, forKey: .bundle)
         case .recorder(let id): try c.encode("recorder", forKey: .type); try c.encode(id, forKey: .id)
+        case .program: try c.encode("program", forKey: .type)
         }
     }
 }
@@ -91,6 +98,7 @@ public struct Node: Hashable, Codable, Identifiable {
 
     public static let hub = Node(id: Graph.hubID, kind: .hub, label: "Pancake")
     public static let mic = Node(id: Graph.micID, kind: .mic, label: "Pancake Mic")
+    public static let program = Node(id: Graph.programID, kind: .program, label: "Pancake Program")
     public static func output(_ uid: String, label: String? = nil) -> Node { Node(id: NodeID("out:" + uid), kind: .output(deviceUID: uid), label: label) }
     public static func input(_ uid: String, label: String? = nil) -> Node { Node(id: NodeID("in:" + uid), kind: .input(deviceUID: uid), label: label) }
     public static func tap(_ bundleID: String, label: String? = nil) -> Node { Node(id: NodeID("tap:" + bundleID), kind: .tap(bundleID: bundleID), label: label) }
@@ -165,6 +173,7 @@ public struct Policy: Hashable, Codable {
 public struct Graph: Hashable, Codable {
     public static let hubID: NodeID = "hub"
     public static let micID: NodeID = "mic"
+    public static let programID: NodeID = "program"
 
     public var nodes: [Node]
     public var links: [Link]
@@ -221,6 +230,13 @@ public struct Graph: Hashable, Codable {
         for l in links(to: Graph.micID) {
             if case .input(let uid)? = node(l.from.node)?.kind, !seen.contains(uid) { seen.append(uid) }
         }
+        return seen
+    }
+
+    /// Nodes feeding the Pancake Program bus (directly), in link order — what the screen share carries.
+    public var programSourceNodeIDs: [NodeID] {
+        var seen: [NodeID] = []
+        for l in links(to: Graph.programID) where !seen.contains(l.from.node) { seen.append(l.from.node) }
         return seen
     }
 

@@ -16,7 +16,8 @@ import Foundation
 /// Gain-only changes skip all that and atomically swap the matrix under the running IOProc.
 public final class Engine {
     /// Bundle ids the engine must never build a process tap for: pancake's own processes. Tapping the
-    /// process that drives the IOProc creates runaway feedback that bypasses the hub volume/mute.
+    /// process that drives the IOProc creates runaway feedback that bypasses the hub volume/mute; the
+    /// Stage's output *is* the Program bus, so tapping it would just be Program again, one hop later.
     public static let selfBundleIDs: Set<String> = ["com.pancake.app", "com.pancake.stage"]
 
     public struct Configuration {
@@ -24,6 +25,8 @@ public final class Engine {
         public var hubUID = "Pancake_UID"
         /// UID of the virtual device apps record from. The engine writes it.
         public var micUID = "PancakeMic_UID"
+        /// UID of the screen-share bus. The engine writes it; the Stage plays it back as its own output.
+        public var programUID = "PancakeProgram_UID"
         /// Keep the system default output (and system-sounds output) on the hub.
         public var pinDefaultOutput = true
         /// When the default output moves to a *physical* device (the user picked one in Control
@@ -368,6 +371,9 @@ public final class Engine {
     private var overloadListener: PropertyListener?
     /// Live process taps, keyed by bundle id. Created/destroyed on rebuild; reused across them.
     private var taps: [String: ProcessTap] = [:]
+    /// Bundle ids the last rebuild wanted a tap for (whether or not the app was running then), so a
+    /// later launch of one of them is recognised as "now tappable — rebuild".
+    private var wantedTapBundleIDs: [String] = []
     /// Recorder node id → its pk_context recorder slot, (re)assigned whenever the matrix compiles.
     private var recorderSlots: [NodeID: Int] = [:]
     /// Active recordings by node id, each draining its ring to a file. All touched only on `queue`.
@@ -437,6 +443,9 @@ public final class Engine {
 
         case .defaultInputChanged:
             if desiredGraph.policy.lockInput { reconcileInputPin() }
+
+        case .processListChanged:
+            reconcileTapProcesses()
         }
     }
 
@@ -570,26 +579,69 @@ public final class Engine {
     // MARK: Build / teardown
 
     /// Bring the live process taps in line with the graph's `.tap` nodes: create one per app that
-    /// is a live HAL process, reuse ones already made, destroy the rest. Returns the live taps in
-    /// `wanted` order — the order they'll take in the aggregate's tap list and the input layout.
+    /// is a live HAL process, reuse ones already made (re-pointed at the app's current processes if
+    /// those changed), destroy the rest. A tap whose app has quit is *kept* — it just yields silence
+    /// until the app is back, when `reconcileTapProcesses` re-points it with no rebuild. Returns the
+    /// live taps in `wanted` order — the order they'll take in the aggregate's tap list and the
+    /// input layout.
     private func reconcileTaps(wanted: [String]) -> [(bundleID: String, tap: ProcessTap)] {
+        wantedTapBundleIDs = wanted
         for (bundleID, tap) in taps where !wanted.contains(bundleID) {
             tap.destroy(); taps[bundleID] = nil
             Log.info("tap \(bundleID): released")
         }
         var ordered: [(bundleID: String, tap: ProcessTap)] = []
         for bundleID in wanted where !ordered.contains(where: { $0.bundleID == bundleID }) {
-            if let existing = taps[bundleID], !ProcessTap.processObjects(forBundleID: bundleID).isEmpty {
-                ordered.append((bundleID, existing)); continue
+            if let existing = taps[bundleID] {
+                if let live = retarget(existing) { ordered.append((bundleID, live)); continue }
+                taps[bundleID] = nil   // couldn't re-point it and couldn't replace it; fall through to a fresh create
             }
-            if let stale = taps[bundleID] { stale.destroy(); taps[bundleID] = nil }
             if let tap = ProcessTap.create(bundleID: bundleID, name: "pancake: \(bundleID)") {
                 taps[bundleID] = tap
                 ordered.append((bundleID, tap))
-                Log.info("tap \(bundleID): capturing (uuid \(tap.uuid))")
+                Log.info("tap \(bundleID): capturing \(tap.processObjects.count) process(es) (uuid \(tap.uuid))")
             }
         }
         return ordered
+    }
+
+    /// Point a tap at its app's *current* process family if that changed. Same UUID, so nothing
+    /// holding the tap notices. If the HAL won't take the update, replace the tap (new UUID — the
+    /// caller must then rebuild the aggregate). Returns nil only if neither worked.
+    private func retarget(_ tap: ProcessTap) -> ProcessTap? {
+        let family = ProcessTap.processObjects(forBundleID: tap.bundleID)
+        guard !family.isEmpty, family != tap.processObjects else { return tap }   // app gone (keep, silent) or unchanged
+        if tap.update(processObjects: family) {
+            Log.info("tap \(tap.bundleID): now capturing \(family.count) process(es) (in place)")
+            return tap
+        }
+        Log.warn("tap \(tap.bundleID): HAL refused the in-place update; replacing the tap")
+        tap.destroy()
+        guard let fresh = ProcessTap.create(bundleID: tap.bundleID, name: "pancake: \(tap.bundleID)") else { return nil }
+        taps[tap.bundleID] = fresh
+        return fresh
+    }
+
+    /// The HAL's process list changed: an app or one of its helpers launched or quit. Re-point every
+    /// live tap at its app's current processes (in place — no rebuild); if an app we *want* to tap
+    /// but couldn't (it wasn't running) is now tappable, or a tap had to be replaced, rebuild so the
+    /// aggregate's tap list catches up.
+    private func reconcileTapProcesses() {
+        var needRebuild: [String] = []
+        for (bundleID, tap) in taps {
+            let before = tap.uuid
+            if let live = retarget(tap) {
+                if live.uuid != before { needRebuild.append(bundleID) }
+            } else {
+                taps[bundleID] = nil
+                needRebuild.append(bundleID)
+            }
+        }
+        for bundleID in wantedTapBundleIDs where taps[bundleID] == nil && !ProcessTap.processObjects(forBundleID: bundleID).isEmpty {
+            Log.info("tap \(bundleID): app is now running")
+            needRebuild.append(bundleID)
+        }
+        if !needRebuild.isEmpty { scheduleRebuild(reason: "taps changed (\(needRebuild.sorted()))") }
     }
 
     private func destroyAllTaps() {
@@ -641,13 +693,17 @@ public final class Engine {
                     notes.append("refusing to tap \(bundleID): that's pancake itself — it would feed back. Dropping.")
                     g.remove(node.id)
                 }
-            case .hub, .mic, .recorder:
-                break   // hub/mic handled below; a recorder is a virtual sink with no device
+            case .hub, .mic, .program, .recorder:
+                break   // hub/mic/program handled below; a recorder is a virtual sink with no device
             }
         }
         if g.node(Graph.micID) != nil, present[configuration.micUID] == nil {
             notes.append("mic device \(configuration.micUID) not found; skipping")
             g.remove(Graph.micID)
+        }
+        if g.node(Graph.programID) != nil, present[configuration.programUID] == nil {
+            notes.append("program device \(configuration.programUID) not found; skipping")
+            g.remove(Graph.programID)
         }
 
         if g.hubOutputDeviceUIDs.isEmpty {
@@ -699,6 +755,7 @@ public final class Engine {
         var subUIDs: [String] = [hub.uid]
         for uid in graph.referencedDeviceUIDs.sorted() where !subUIDs.contains(uid) { subUIDs.append(uid) }
         if graph.node(Graph.micID) != nil, !subUIDs.contains(configuration.micUID) { subUIDs.append(configuration.micUID) }
+        if graph.node(Graph.programID) != nil, !subUIDs.contains(configuration.programUID) { subUIDs.append(configuration.programUID) }
         let subDevices = subUIDs.compactMap { uid in devices.first { $0.uid == uid } }
 
         // Clock master: the first physical output in the graph; the hub only if there's nothing else.
@@ -722,7 +779,7 @@ public final class Engine {
            cur.mainSubDeviceUID == composition.mainSubDeviceUID,
            case .running(let info) = currentState {
             let slots = syncRecorderSlots(graph)
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
             compiled.warnings.forEach { Log.warn($0) }
             if let matrix = MatrixCompiler.makeMatrix(compiled.routes) {
                 let cycles = pk_context_cycles(rt)
@@ -769,7 +826,7 @@ public final class Engine {
             Log.debug("layout: \(layout)")
 
             let slots = syncRecorderSlots(graph)
-            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
+            let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
             compiled.warnings.forEach { Log.warn($0) }
             guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else {
                 throw ChannelLayout.ResolutionError(description: "matrix allocation failed")
@@ -803,7 +860,7 @@ public final class Engine {
         let devices = AudioDevice.all(includeHidden: true)
         let (graph, _) = effectiveGraph(from: desiredGraph, devices: devices)
         let slots = syncRecorderSlots(graph)
-        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, recorderSlots: slots)
+        let compiled = MatrixCompiler.compile(graph: graph, layout: layout, hubUID: configuration.hubUID, micUID: configuration.micUID, programUID: configuration.programUID, recorderSlots: slots)
         compiled.warnings.forEach { Log.warn($0) }
         guard let matrix = MatrixCompiler.makeMatrix(compiled.routes) else { return }
         let cycles = pk_context_cycles(rt)

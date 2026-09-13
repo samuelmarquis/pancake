@@ -7,14 +7,14 @@ import PancakeCore
 
 // Pancake Stage — a clean desktop mirror you window-share in Discord. Because a window-share scopes
 // audio to the shared window's *process*, sharing THIS window never picks up the call's own audio
-// (no echo); and the audio it *does* carry is whatever app you pick, rendered as this process's
-// output into the silent "Pancake Program" bus.
+// (no echo); and the audio it *does* carry is the **Pancake Program** bus — whatever the graph
+// mixes into it (app taps, the hub, a mic, each with a gain) — played back as this process's output.
 //
-// It's a faceless background helper: no Dock icon, no control panel. You drive it entirely from the
-// pancake menu bar, which writes ~/.config/pancake/stage.json (StageConfig); the Stage watches that
-// file and obeys. Its one window — the chrome-free "Pancake Stage" mirror — is always parked
-// off-desktop (a 1pt on-screen sliver), so it's invisible to you but stays composited and listed in
-// Discord's window picker. You just window-share "Pancake Stage".
+// It's a faceless background helper: no Dock icon, no control panel, no configuration. The menu bar
+// launches and quits it; *what* is shared is chosen in the graph (wire sources → Pancake Program),
+// and the engine does the mixing. Its one window — the chrome-free "Pancake Stage" mirror — is
+// always parked off-desktop (a 1pt on-screen sliver), so it's invisible to you but stays composited
+// and listed in Discord's window picker. You just window-share "Pancake Stage".
 
 /// The view that displays captured frames.
 final class MirrorView: NSView {
@@ -104,29 +104,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-// TappableApp + tappableApps() live in PancakeCore (shared with the menu bar).
-
 final class StageDelegate: NSObject, NSApplicationDelegate {
     private var mirrorWindow: NSWindow!
     private var capture: Capture!
     private let audio = StageAudio()
-
-    // The file IS the IPC. The menu bar writes it; we watch it and obey.
-    private let store = StageStore()
-    private var config = StageConfig()
-    private var watcher: FileWatcher?
-    private let ioQueue = DispatchQueue(label: "com.pancake.stage.config")
-
-    /// The bundle id the audio tap is *actually* running on (vs. `config.bundleID`, the desired one).
-    private var currentBundleID: String?
-    /// Preferred app to select automatically when it becomes available (until an app is chosen).
-    private let preferredBundleID = "com.ableton.live"
-    /// Auto-select is a one-shot: it disarms as soon as any app has been chosen (here or in the
-    /// menu), so we never override a later choice. Makes "start the share, then open Ableton" work.
-    private var autoSelectArmed = true
-
-    /// Fires when the HAL's process set changes — i.e. an app becomes (un)tappable. Drives auto-tap.
-    private var processListener: PropertyListener?
+    /// Watches the HAL so the audio half can (re)start when the driver's devices appear — after a
+    /// driver install, or a coreaudiod restart that killed our aggregate.
+    private var monitor: HardwareMonitor?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)   // faceless: no Dock icon; driven from the menu bar
@@ -138,12 +122,8 @@ final class StageDelegate: NSObject, NSApplicationDelegate {
         capture.onDisplaySize = { [weak self] size in self?.matchMirrorAspect(size) }
         capture.start()
 
-        // Load the saved config and watch for edits (from the menu, us, or a text editor).
-        config = (try? store.load()) ?? StageConfig()
-        installConfigWatcher()
-
-        // Tapping an app is "audio capture" to TCC → Microphone permission (same gate the engine's
-        // taps use). Ask, then start the audio half.
+        // Reading the Program bus is an *input* stream → Microphone permission to TCC (a denied
+        // client reads silence, no error). Ask, then start the audio half.
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             enableAudio()
@@ -162,47 +142,22 @@ final class StageDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.logShareability("launch") }
     }
 
-    // MARK: Config (the IPC)
+    // MARK: Audio — play Program back as our output, and keep doing so
 
-    private func installConfigWatcher() {
-        watcher = store.watch(queue: ioQueue) { [weak self] in
-            guard let self, let loaded = try? self.store.load() else { return }
-            DispatchQueue.main.async {
-                guard loaded != self.config else { return }   // ignore our own save coming back around
-                NSLog("stage: config changed on disk; applying")
-                self.applyConfig(loaded, persist: false)
-            }
+    private func enableAudio() {
+        ensureAudio("launch")
+        monitor = try? HardwareMonitor(queue: .main) { [weak self] event in
+            guard event == .devicesChanged else { return }
+            self?.ensureAudio("devices changed")
         }
     }
 
-    /// Apply a config: reconcile the audio tap to `bundleID`, and (when the change is local) persist.
-    private func applyConfig(_ new: StageConfig, persist: Bool) {
-        config = new
-        if new.bundleID != nil { autoSelectArmed = false }   // an app was chosen; stop auto-tapping
-        if persist {
-            do { try store.save(new) } catch { NSLog("stage: save config: \(error)") }
-        }
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { applyAudio() }
-    }
-
-    /// Start/stop the tap so the running audio matches `config.bundleID`.
-    private func applyAudio() {
-        guard config.bundleID != currentBundleID else { return }
-        if let bid = config.bundleID, !bid.isEmpty {
-            currentBundleID = bid
-            NSLog("stage: audio: \(audio.start(bundleID: bid))")
-        } else {
-            audio.stop()
-            currentBundleID = nil
-            NSLog("stage: audio stopped (none selected)")
-        }
-    }
-
-    /// Mutate the config from a local trigger (auto-tap) and apply + persist it.
-    private func update(_ mutate: (inout StageConfig) -> Void) {
-        var c = config
-        mutate(&c)
-        applyConfig(c, persist: true)
+    /// Start the repeater if it isn't running, or restart it if its aggregate died under it. A
+    /// devices-changed notification is also fired by our *own* aggregate's create/destroy, so this
+    /// must be a no-op when everything is healthy.
+    private func ensureAudio(_ why: String) {
+        guard !audio.isHealthy else { return }
+        NSLog("stage: audio (\(why)): \(audio.start())")
     }
 
     // MARK: Mirror window — chrome-free and always parked off-desktop
@@ -267,38 +222,8 @@ final class StageDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: Auto-tap when the target app appears
-
-    private func enableAudio() {
-        installProcessListener()
-        applyAudio()   // honour a bundleID already in the saved config
-        guard config.bundleID == nil else { return }
-        // Nothing chosen yet: auto-select the preferred app if it's tappable right now; otherwise
-        // wait for the process listener to catch it launching (or for a menu pick).
-        if autoSelectArmed && tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
-            update { $0.bundleID = preferredBundleID }
-        }
-    }
-
-    private func installProcessListener() {
-        guard processListener == nil else { return }
-        processListener = try? systemAudioObject.addPropertyListener(
-            .init(kAudioHardwarePropertyProcessObjectList), queue: .main) { [weak self] in
-            self?.processListChanged()
-        }
-    }
-
-    private func processListChanged() {
-        guard autoSelectArmed, config.bundleID == nil else { return }
-        if tappableApps().contains(where: { $0.bundleID == preferredBundleID }) {
-            NSLog("stage: preferred app became tappable — auto-selecting")
-            update { $0.bundleID = preferredBundleID }
-        }
-    }
-
     func applicationWillTerminate(_ n: Notification) {
-        processListener?.remove()
-        watcher?.stop()
+        monitor?.stop()
         audio.stop()
     }
 }

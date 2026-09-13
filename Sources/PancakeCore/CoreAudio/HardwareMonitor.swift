@@ -8,6 +8,9 @@ public final class HardwareMonitor {
         case defaultOutputChanged
         case defaultSystemOutputChanged
         case defaultInputChanged
+        /// The HAL's set of audio-producing processes changed: an app (or one of its helpers)
+        /// launched or quit. What process taps key on.
+        case processListChanged
 
         public var description: String {
             switch self {
@@ -15,6 +18,7 @@ public final class HardwareMonitor {
             case .defaultOutputChanged: return "default output changed"
             case .defaultSystemOutputChanged: return "default system output changed"
             case .defaultInputChanged: return "default input changed"
+            case .processListChanged: return "process list changed"
             }
         }
     }
@@ -27,6 +31,7 @@ public final class HardwareMonitor {
             (kAudioHardwarePropertyDefaultOutputDevice, .defaultOutputChanged),
             (kAudioHardwarePropertyDefaultSystemOutputDevice, .defaultSystemOutputChanged),
             (kAudioHardwarePropertyDefaultInputDevice, .defaultInputChanged),
+            (kAudioHardwarePropertyProcessObjectList, .processListChanged),
         ]
         for (selector, event) in subscriptions {
             listeners.append(try systemAudioObject.addPropertyListener(.init(selector), queue: queue) { handler(event) })

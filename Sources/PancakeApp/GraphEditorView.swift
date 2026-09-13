@@ -33,8 +33,6 @@ struct GraphEditorView: View {
         .background(WindowBackground())
         .onAppear { app.refreshStage(); editor.sync(); canvasFocused = true }
         .onChange(of: app.graph) { _, _ in editor.sync() }
-        .onChange(of: app.stageConfig) { _, _ in editor.sync() }
-        .onChange(of: app.stageRunning) { _, _ in editor.sync() }
     }
 }
 
@@ -77,7 +75,7 @@ private struct GraphCanvas: View {
         let live = liveEdgeIDs
         let draws: [DrawEdge] = editor.edges.compactMap { e in
             guard let (a, b) = editor.edgeEndpoints(e) else { return nil }
-            let isLive = e.kind == .stage ? app.stageRunning : live.contains(e.id)
+            let isLive = live.contains(e.id)
             return DrawEdge(id: e.id,
                             from: a.offset(editor.pan), to: b.offset(editor.pan),
                             c0: desc[e.from].map { GraphPalette.color(for: $0.kind) } ?? .gray,
@@ -140,7 +138,7 @@ private struct GraphCanvas: View {
     }
 
     @ViewBuilder private func cardBody(_ node: GNode) -> some View {
-        if case .graph(.recorder) = node.kind {
+        if case .recorder = node.kind {
             RecorderCard(editor: editor, node: node, hovered: editor.hoveredNode == node.id)
         } else {
             NodeCard(node: node, hovered: editor.hoveredNode == node.id)
@@ -254,11 +252,11 @@ private struct WireShape: Shape {
     func path(in rect: CGRect) -> Path { bezier(from: from, to: to) }
 }
 
-// MARK: - Edge interaction (gain knob / stage badge at the midpoint)
+// MARK: - Edge interaction (gain knob at the midpoint)
 
-/// Renders the knob (audio) or record badge (screen share) at a hovered wire's midpoint, and carries
-/// their drag/tap gestures. Hover itself is decided centrally (GraphEditorModel.hoverAt) — this view
-/// has no hit region of its own, so it can never steal hover from nodes or other wires.
+/// Renders the gain knob at a hovered wire's midpoint and carries its drag/tap gestures. Hover
+/// itself is decided centrally (GraphEditorModel.hoverAt) — this view has no hit region of its own,
+/// so it can never steal hover from nodes or other wires.
 private struct EdgeInteractor: View {
     @ObservedObject var editor: GraphEditorModel
     let edge: BusEdge
@@ -279,28 +277,20 @@ private struct EdgeInteractor: View {
 
     var body: some View {
         if hot {
-            switch edge.kind {
-            case .audio:
-                Knob(gain: edge.gain, c0: wireColors.0, c1: wireColors.1)
-                    // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
-                    .gesture(
-                        DragGesture(minimumDistance: 3)
-                            .onChanged { v in
-                                if editor.knobEdge == nil { editor.beginKnob(edge) }
-                                editor.dragKnob(edge, translation: v.translation)
-                            }
-                            .onEnded { _ in editor.endKnob() }
-                    )
-                    .onTapGesture(count: 2) { editor.resetKnob(edge) }
-                    .contextMenu { Button("Remove", role: .destructive) { editor.removeEdge(edge.id) } }
-                    .help("Drag to set gain · double-click for unity")
-                    .position(mid)
-            case .stage:
-                StageBadge()
-                    .contextMenu { Button("Remove", role: .destructive) { editor.removeEdge(edge.id) } }
-                    .help("Screen-share source. ⌫ to stop sharing this app.")
-                    .position(mid)
-            }
+            Knob(gain: edge.gain, c0: wireColors.0, c1: wireColors.1)
+                // minimumDistance > 0 so a plain double-click isn't eaten by the drag.
+                .gesture(
+                    DragGesture(minimumDistance: 3)
+                        .onChanged { v in
+                            if editor.knobEdge == nil { editor.beginKnob(edge) }
+                            editor.dragKnob(edge, translation: v.translation)
+                        }
+                        .onEnded { _ in editor.endKnob() }
+                )
+                .onTapGesture(count: 2) { editor.resetKnob(edge) }
+                .contextMenu { Button("Remove", role: .destructive) { editor.removeEdge(edge.id) } }
+                .help("Drag to set gain · double-click for unity")
+                .position(mid)
         }
     }
 }
@@ -356,20 +346,6 @@ private struct GaugeArc: Shape {
             if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
         }
         return p
-    }
-}
-
-/// The midpoint marker on a screen-share edge — informational; the wire has no gain (it's video+audio
-/// captured by the Stage, not a routed gain link). Delete with ⌫ while hovered.
-private struct StageBadge: View {
-    var body: some View {
-        Image(systemName: "rectangle.inset.filled.badge.record")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(GraphPalette.color(for: .program))
-            .padding(6)
-            .background(.regularMaterial, in: Circle())
-            .overlay(Circle().stroke(.primary.opacity(0.15)))
-            .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
     }
 }
 
@@ -650,23 +626,20 @@ private struct Legend: View {
 // MARK: - Glyphs + small helpers
 
 private enum NodeGlyph {
-    static func name(for kind: GKind, title: String) -> String {
+    static func name(for kind: NodeKind, title: String) -> String {
         switch kind {
         case .program: return "play.rectangle.fill"
-        case .graph(let k):
-            switch k {
-            case .hub: return "square.stack.3d.up.fill"
-            case .mic: return "mic.fill"
-            case .input: return "waveform"
-            case .tap: return "app.fill"
-            case .recorder: return "recordingtape"
-            case .output:
-                let n = title.lowercased()
-                if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
-                if n.contains("airpod") { return "airpodspro" }
-                if n.contains("display") || n.contains("studio") || n.contains("xdr") { return "display" }
-                return "hifispeaker.fill"
-            }
+        case .hub: return "square.stack.3d.up.fill"
+        case .mic: return "mic.fill"
+        case .input: return "waveform"
+        case .tap: return "app.fill"
+        case .recorder: return "recordingtape"
+        case .output:
+            let n = title.lowercased()
+            if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
+            if n.contains("airpod") { return "airpodspro" }
+            if n.contains("display") || n.contains("studio") || n.contains("xdr") { return "display" }
+            return "hifispeaker.fill"
         }
     }
 }
