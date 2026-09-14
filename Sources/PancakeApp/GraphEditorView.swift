@@ -31,6 +31,7 @@ struct GraphEditorView: View {
         .ignoresSafeArea(.container, edges: .top)   // let the top bar reach up flush with the traffic lights
         .frame(minWidth: 460, minHeight: 340)
         .background(WindowBackground())
+        .background(GraphWindowAccessor())
         .onAppear { app.refreshStage(); editor.sync(); canvasFocused = true }
         .onChange(of: app.graph) { _, _ in editor.sync() }
     }

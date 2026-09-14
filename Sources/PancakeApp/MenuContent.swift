@@ -112,9 +112,12 @@ struct MenuContent: View {
 
     /// Open the routing window. We're an `.accessory` app (no Dock icon), so nudge ourselves to the
     /// front or the window would open unfocused behind whatever's active. The menu-bar popover is the
-    /// key window while the menu is open; close it first so it doesn't linger behind the window.
+    /// key window while the menu is open; close it first so it doesn't linger behind the window. If the
+    /// graph is already open on another desktop it comes to this one (`GraphWindow`) — before the
+    /// activation, which would otherwise switch Spaces to wherever the app has a window.
     private func showGraph() {
         NSApp.keyWindow?.close()
+        GraphWindow.prepareToShow()
         openWindow(id: "graph")
         NSApp.activate(ignoringOtherApps: true)
     }

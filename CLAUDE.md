@@ -231,7 +231,9 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
 5. Sleep/wake soak. Sample-rate change on the master (e.g. a 44.1 kHz interface) → rebuild path is
    untested.
 6. ✅ **Graph window** — the menu's **Show graph…** opens a pipewire-style patchbay
-   (`Sources/PancakeApp/GraphEditor*.swift`). Sources (Pancake, inputs, app taps) on the left, sinks
+   (`Sources/PancakeApp/GraphEditor*.swift`). If it's already open on another desktop it comes to the
+   current one rather than switching Spaces (`GraphWindow.swift`: `.moveToActiveSpace` for one show
+   request only, so activating the app never drags it; a full-screen graph stays put). Verified live. Sources (Pancake, inputs, app taps) on the left, sinks
    (outputs, Pancake Mic, **Pancake Program**) on the right; **one bus port per side** (L/R is fungible
    — a connection is a whole stereo/mono bus, drawn as bundled strands, never split). Drag between
    ports to route; the mapping is chosen for you (mono fans to both, stereo sums to mono, else
