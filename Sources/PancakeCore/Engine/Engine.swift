@@ -125,7 +125,7 @@ public final class Engine {
             }
             let t = DispatchSource.makeTimerSource(queue: queue)
             t.schedule(deadline: .now() + 1, repeating: 1)
-            t.setEventHandler { [weak self] in self?.attemptBluetoothReconnect(force: false) }
+            t.setEventHandler { [weak self] in self?.attemptBluetoothReconnect() }
             t.resume()
             signalTimer = t
             let w = DispatchSource.makeTimerSource(queue: queue)
@@ -162,27 +162,25 @@ public final class Engine {
         }
     }
 
-    /// The desired output is what the graph says; if it's a Bluetooth device that isn't
-    /// present and audio is playing into the hub (or `force`), ask macOS to bring it back.
-    private func attemptBluetoothReconnect(force: Bool) {
+    /// The desired output is what the graph says; if it's a Bluetooth device that isn't present and
+    /// audio is playing into the hub, ask macOS to bring it back. This is the *automatic* half only
+    /// — asking for a device because the user clicked it in the menu is the menu's own job
+    /// (`AppModel.connect`), so this never fires for a device the engine isn't already trying to play to.
+    private func attemptBluetoothReconnect() {
         guard case .running(let info) = currentState,
               let wantUID = desiredGraph.hubOutputDeviceUIDs.first,
               info.effectiveGraph.hubOutputDeviceUIDs.first != wantUID,
-              let address = BluetoothReconnector.address(fromDeviceUID: wantUID),
-              !reconnectInFlight else { return }
-        if !force {
-            guard let interval = configuration.bluetoothReconnectInterval,
-                  Date().timeIntervalSince(lastReconnectAttempt) >= interval else { return }
-            let peak = layout?.inputs[configuration.hubUID]?.first.map { pk_context_input_peak(rt, UInt32($0.buffer)) } ?? 0
-            guard peak >= configuration.signalThreshold else { return }
-            Log.info("audio is playing and \(wantUID) is away; asking Bluetooth to reconnect")
-        } else {
-            Log.info("reconnect requested for \(wantUID)")
-        }
+              let address = Bluetooth.address(fromDeviceUID: wantUID),
+              !reconnectInFlight,
+              let interval = configuration.bluetoothReconnectInterval,
+              Date().timeIntervalSince(lastReconnectAttempt) >= interval else { return }
+        let peak = layout?.inputs[configuration.hubUID]?.first.map { pk_context_input_peak(rt, UInt32($0.buffer)) } ?? 0
+        guard peak >= configuration.signalThreshold else { return }
+        Log.info("audio is playing and \(wantUID) is away; asking Bluetooth to reconnect")
         lastReconnectAttempt = Date()
         reconnectInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let failure = BluetoothReconnector.connect(address: address)
+            let failure = Bluetooth.connect(address: address)
             self?.queue.async {
                 self?.reconnectInFlight = false
                 if let failure { Log.warn("bluetooth reconnect \(address): \(failure)") }
@@ -243,11 +241,6 @@ public final class Engine {
             guard let b = layout?.inputs[configuration.hubUID]?.first?.buffer else { return 0 }
             return pk_context_input_peak(rt, UInt32(b))
         }
-    }
-
-    /// Ask macOS to reconnect the desired output right now, if it's an absent Bluetooth device.
-    public func reconnectDesiredOutputIfBluetooth() {
-        queue.async { [self] in attemptBluetoothReconnect(force: true) }
     }
 
     /// Tear the aggregate down and build it again, even if nothing changed. The escape hatch.

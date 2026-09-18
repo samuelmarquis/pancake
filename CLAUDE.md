@@ -130,7 +130,20 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
 - Only one engine at a time: the CLI `run` and the app both build an aggregate with the same UID and both
   pin the default output. Stop one before starting the other.
 - Bluetooth reconnect uses IOBluetooth `openConnection` (same as `blueutil --connect`). First use may
-  prompt for Bluetooth permission for the app.
+  prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
+  output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
+  on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
+  the device once the HAL lists it (`awaiting`) and shows connecting/unreachable on the row.
+- **Pinned devices** — `Sources/PancakeApp/PinnedDevices.swift`, `~/.config/pancake/pins.json`. Rows the
+  menu keeps whether or not the device is connected, so an absent Bluetooth device is still a button
+  that fetches it (including back off a phone). *Not* in `graph.json`: pins aren't routing, and that
+  file is the engine's IPC — same reasoning as `graph-layout.json`. The section header's `+` folds out
+  every paired Bluetooth *audio* device (major class 0x04, so no mice or BLE gadgets; the Input list
+  skips loudspeakers) as ordinary rows — click connects, the pin pins. A device pinned before pancake
+  ever saw it as an audio device gets a synthesised UID and heals from the real device on first
+  connect: **IOBluetooth spells addresses lowercase and Core Audio uppercase**, so nothing compares
+  device UIDs with `==` (`MenuDevice.sameUID`, `Bluetooth.sameAddress`). Built-in speakers/mic sort
+  first and have no pin — they can't be absent. Verified live 2026-09-17.
 - **The app needs Microphone permission or it routes silence.** Reading any input stream — including
   our own Pancake device inside the aggregate — is "microphone access" to TCC, and a denied client gets
   zero-filled input with *no error*. The symptom is `health: … hub=0.000` in the app's log while a CLI

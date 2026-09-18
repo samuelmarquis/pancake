@@ -37,8 +37,16 @@ hardware:
 
 From the menu bar you get: an output picker (Control Center's picker works too —
 the engine follows it), a volume slider, input selection for Pancake Mic, output/
-input locks, "Reconnect" for stolen Bluetooth, screen-share start/stop, and
-**Start at login**.
+input locks, screen-share start/stop, and **Start at login**.
+
+**Devices that aren't here.** Each list starts with the machine's own speakers or
+mic, then everything connected. Hover any other row and a **pin** keeps it listed
+whether or not it's connected — and a pinned Bluetooth row is a button that goes
+and gets the device, which is also how you take AirPods back from a phone that's
+holding them. It's selected as soon as it arrives. The **+** in a section header
+folds out everything already paired in Bluetooth, so you can connect (or pin) a
+device you've never pinned; pairing something *new* is still System Settings' job.
+Pins are yours to edit: `~/.config/pancake/pins.json`.
 
 ### The graph
 

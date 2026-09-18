@@ -6,26 +6,6 @@ import PancakeCore
 import ServiceManagement
 
 
-/// One row in the output list: a present device, or the device the graph wants that isn't here.
-struct MenuOutput: Identifiable, Hashable {
-    let uid: String
-    let name: String
-    let present: Bool
-    let isBluetooth: Bool
-    /// Battery percentages to show under a Bluetooth row (left, right, case), when known.
-    var battery: [Int] = []
-    var id: String { uid }
-}
-
-/// One row in the input list: a physical input device that can feed Pancake Mic.
-struct MenuInput: Identifiable, Hashable {
-    let uid: String
-    let name: String
-    let present: Bool
-    let isBluetooth: Bool
-    var id: String { uid }
-}
-
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
@@ -57,7 +37,25 @@ final class AppModel: ObservableObject {
     /// Whether the app is registered to launch at login (SMAppService).
     @Published private(set) var launchAtLogin = false
 
+    /// Devices the user wants listed whether or not they're connected (`PinnedDevices.swift`).
+    @Published private(set) var pins: [PinnedDevice] = []
+    /// Paired Bluetooth audio devices, for the menu's "pin a device" picker. Refreshed off the main
+    /// thread when the picker opens.
+    @Published private(set) var pairedBluetooth: [Bluetooth.Device] = []
+    /// What a summoned Bluetooth device's row is showing, keyed by lowercased address. Lives here
+    /// rather than in the row so it survives closing the menu mid-connect.
+    @Published private(set) var connectState: [String: ConnectState] = [:]
+
+    enum ConnectState { case asking, unreachable }
+
     private let store = GraphStore()
+    private let pinStore = PinStore()
+    /// A Bluetooth device we asked for and mean to select once the HAL lists it, per section.
+    /// Clicking a row that isn't here means "play here" — it just has to arrive first.
+    private var awaiting: [DeviceRole: (address: String, deadline: Date)] = [:]
+    /// How long we wait for a summoned device before calling it unreachable. `openConnection` itself
+    /// can sit for several seconds, and the HAL takes a moment more to list the device.
+    private static let connectWindow: TimeInterval = 12
     /// The desired routing graph. Published so the visual editor re-renders when it changes —
     /// whether the change came from the menu, the editor itself, the CLI, or a hand-edit of the file.
     @Published private(set) var graph: Graph
@@ -90,6 +88,7 @@ final class AppModel: ObservableObject {
             do { try store.save(loaded) } catch { Log.warn("save migrated graph: \(error)") }
         }
         graph = loaded
+        pins = pinStore.load()
         engine = Engine(graph: loaded)
 
         let engineRef = engine
@@ -167,26 +166,67 @@ final class AppModel: ObservableObject {
 
     // MARK: Derived state for the menu
 
-    var menuOutputs: [MenuOutput] {
-        var rows = outputs.map { MenuOutput(uid: $0.uid, name: $0.name, present: true, isBluetooth: $0.transport.isBluetooth) }
-        if let want = desiredOutputUID, !rows.contains(where: { $0.uid == want }) {
-            rows.append(MenuOutput(uid: want, name: desiredOutputLabel ?? want, present: false,
-                                   isBluetooth: BluetoothReconnector.address(fromDeviceUID: want) != nil))
+    var menuOutputs: [MenuDevice] { menuRows(.output) }
+    var menuInputs: [MenuDevice] { menuRows(.input) }
+
+    /// One section's rows: every device that's here, plus the pinned ones that aren't and (always)
+    /// the one the graph wants, so a selection is never invisible. The machine's own speakers/mic come
+    /// first — they can't go away, so they're the one row always worth knowing where to find — and the
+    /// rest sort by name as one list: absent rows sit where the device *usually* sits, so nothing
+    /// jumps around when it connects.
+    private func menuRows(_ role: DeviceRole) -> [MenuDevice] {
+        let devices = role == .output ? outputs : inputs
+        var rows = devices.map {
+            MenuDevice(uid: $0.uid, name: $0.name, role: role, present: true,
+                       isBluetooth: $0.transport.isBluetooth, pinned: isPinned($0.uid, role),
+                       onboard: $0.transport == .builtIn, kind: bluetoothKind($0.uid))
         }
-        return rows
+        var absent: [(uid: String, name: String, pinned: Bool)] =
+            pins.filter { $0.role == role }.map { ($0.uid, $0.name, true) }
+        let want = role == .output ? desiredOutputUID : desiredInputUID
+        if let want {
+            absent.append((want, (role == .output ? desiredOutputLabel : desiredInputLabel) ?? want,
+                           isPinned(want, role)))
+        }
+        for a in absent where !rows.contains(where: { MenuDevice.sameUID($0.uid, a.uid) }) {
+            rows.append(MenuDevice(uid: a.uid, name: a.name, role: role, present: false,
+                                   isBluetooth: Bluetooth.address(fromDeviceUID: a.uid) != nil,
+                                   pinned: a.pinned, kind: bluetoothKind(a.uid)))
+        }
+        return rows.sorted {
+            if $0.onboard != $1.onboard { return $0.onboard }   // the machine's own first: it's the fallback
+            let byName = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return byName == .orderedSame ? $0.uid < $1.uid : byName == .orderedAscending
+        }
     }
 
-    var absentBluetoothDesired: MenuOutput? {
-        menuOutputs.first { !$0.present && $0.isBluetooth }
+    func isPinned(_ uid: String, _ role: DeviceRole) -> Bool {
+        pins.contains { $0.role == role && MenuDevice.sameUID($0.uid, uid) }
     }
 
-    var menuInputs: [MenuInput] {
-        var rows = inputs.map { MenuInput(uid: $0.uid, name: $0.name, present: true, isBluetooth: $0.transport.isBluetooth) }
-        if let want = desiredInputUID, !rows.contains(where: { $0.uid == want }) {
-            rows.append(MenuInput(uid: want, name: desiredInputLabel ?? want, present: false,
-                                  isBluetooth: BluetoothReconnector.address(fromDeviceUID: want) != nil))
+    /// What the paired list says this device is, if it's Bluetooth and we've read the list (the menu
+    /// refreshes it when it opens). Only drives the icon.
+    private func bluetoothKind(_ uid: String) -> Bluetooth.Kind? {
+        guard let address = Bluetooth.address(fromDeviceUID: uid) else { return nil }
+        return pairedBluetooth.first { Bluetooth.sameAddress($0.address, address) }?.kind
+    }
+
+    /// A paired Bluetooth device as a row for the picker: not here yet (if it were, the section would
+    /// already list it), so clicking it asks for it exactly like an absent pinned row.
+    func row(for d: Bluetooth.Device, role: DeviceRole) -> MenuDevice {
+        let uid = Bluetooth.deviceUID(address: d.address, input: role == .input)
+        return MenuDevice(uid: uid, name: d.name, role: role, present: false,
+                          isBluetooth: true, pinned: isPinned(uid, role), kind: d.kind)
+    }
+
+    /// The paired Bluetooth devices this section doesn't already list — what the picker offers to pin.
+    /// A loudspeaker has no microphone, so the Input picker doesn't offer one.
+    func pinnable(_ role: DeviceRole) -> [Bluetooth.Device] {
+        let listed = menuRows(role).compactMap(\.address)
+        return pairedBluetooth.filter { d in
+            (role == .output || d.kind.mayHaveMicrophone)
+                && !listed.contains { Bluetooth.sameAddress($0, d.address) }
         }
-        return rows
     }
 
     var statusLine: String {
@@ -223,12 +263,23 @@ final class AppModel: ObservableObject {
 
     // MARK: Actions
 
-    func select(_ item: MenuOutput) {
-        guard item.present, let d = outputs.first(where: { $0.uid == item.uid }) else {
-            // The device the graph already wants, but it isn't here: the only useful thing is to ask for it.
-            reconnect()
-            return
+    /// Click a device row. A device that's here becomes this section's device (clicking the current
+    /// input again clears it); one that isn't here is a request to summon it — see `connect`.
+    func select(_ item: MenuDevice) {
+        guard item.present else { connect(item); return }
+        switch item.role {
+        case .output:
+            guard let d = outputs.first(where: { $0.uid == item.uid }) else { return }
+            selectOutput(d)
+        case .input:
+            if let current = desiredInputUID, MenuDevice.sameUID(item.uid, current) { clearInput(); return }
+            guard let d = inputs.first(where: { $0.uid == item.uid }) else { return }
+            selectInput(d)
         }
+    }
+
+    private func selectOutput(_ d: AudioDevice) {
+        awaiting[.output] = nil   // an explicit choice supersedes whatever we were waiting for
         graph.setOutput(uid: d.uid, channels: min(2, max(1, d.outputChannels)), label: d.name)
         desiredOutputUID = d.uid
         desiredOutputLabel = d.name
@@ -237,10 +288,9 @@ final class AppModel: ObservableObject {
         Log.info("menu: output → \(d.name)")
     }
 
-    /// Select an input to feed Pancake Mic; tapping the current one again clears it.
-    func selectInput(_ item: MenuInput) {
-        if item.uid == desiredInputUID { clearInput(); return }
-        guard item.present, let d = inputs.first(where: { $0.uid == item.uid }) else { return }
+    /// Feed Pancake Mic from this input (what apps like Discord then record).
+    private func selectInput(_ d: AudioDevice) {
+        awaiting[.input] = nil
         graph.setInput(uid: d.uid, channels: min(2, max(1, d.inputChannels)), label: d.name)
         desiredInputUID = d.uid
         desiredInputLabel = d.name
@@ -256,6 +306,115 @@ final class AppModel: ObservableObject {
         engine.apply(graph)
         save()
         Log.info("menu: input cleared")
+    }
+
+    // MARK: Pinned devices, and summoning the ones that aren't here
+
+    /// Keep this device in the menu, or stop. A pinned device is listed in its usual place even when
+    /// it's off or a phone has it, and a Bluetooth one is then a button that fetches it back.
+    func togglePin(_ item: MenuDevice) {
+        guard !item.onboard else { return }   // built in; it's never absent, so a pin means nothing
+        if isPinned(item.uid, item.role) {
+            pins.removeAll { $0.role == item.role && MenuDevice.sameUID($0.uid, item.uid) }
+            Log.info("menu: unpinned \(item.name) from \(item.role.rawValue)")
+        } else {
+            pins.append(PinnedDevice(uid: item.uid, name: item.name, role: item.role))
+            Log.info("menu: pinned \(item.name) to \(item.role.rawValue)")
+        }
+        pinStore.save(pins)
+    }
+
+    /// Pin a paired Bluetooth device we may never have seen as an audio device — it's off, or a phone
+    /// has it. Its UID is synthesised now and healed from the real device the first time it connects.
+    func pin(_ d: Bluetooth.Device, role: DeviceRole) {
+        let uid = Bluetooth.deviceUID(address: d.address, input: role == .input)
+        guard !isPinned(uid, role) else { return }
+        pins.append(PinnedDevice(uid: uid, name: d.name, role: role))
+        pinStore.save(pins)
+        Log.info("menu: pinned \(d.name) to \(role.rawValue) (paired Bluetooth)")
+    }
+
+    /// Re-read the paired Bluetooth devices (an IPC to bluetoothd, so not on the main thread).
+    func refreshPairedBluetooth() {
+        queue.async { [weak self] in
+            let paired = Bluetooth.pairedAudioDevices()
+            Task { @MainActor in if self?.pairedBluetooth != paired { self?.pairedBluetooth = paired } }
+        }
+    }
+
+    /// Pairing something *new* is still System Settings' job — pancake connects what's already paired.
+    func openBluetoothSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Ask Bluetooth for a device that isn't here, and select it when it arrives: clicking a row in
+    /// the Output list means "play here", even when "here" has to be summoned first. This is also how
+    /// you take a device back from a phone that's holding it. Best effort — it may not come, in which
+    /// case the row says so once the window is up.
+    func connect(_ item: MenuDevice) {
+        guard let address = item.address else { return }
+        let key = address.lowercased()
+        guard connectState[key] != .asking else { return }   // already on its way
+        connectState[key] = .asking
+        awaiting[item.role] = (address: address, deadline: Date().addingTimeInterval(Self.connectWindow))
+        Log.info("menu: asking Bluetooth for \(item.name)")
+        let role = item.role, name = item.name
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let failure = Bluetooth.connect(address: address)
+            Task { @MainActor in self?.connectReturned(key, role: role, name: name, failure: failure) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectWindow) { [weak self] in
+            Task { @MainActor in self?.connectWindowClosed(key, role: role) }
+        }
+    }
+
+    private func connectReturned(_ key: String, role: DeviceRole, name: String, failure: String?) {
+        guard let failure else {
+            // Connected as far as Bluetooth is concerned; the row clears when the HAL lists the device.
+            Log.info("connect \(name): connected (waiting for the HAL to list it)")
+            return
+        }
+        Log.warn("connect \(name): \(failure)")
+        connectState[key] = .unreachable
+        if let a = awaiting[role], Bluetooth.sameAddress(a.address, key) { awaiting[role] = nil }
+    }
+
+    /// The device never showed up. Stop claiming to be working on it, and stop meaning to select it.
+    private func connectWindowClosed(_ key: String, role: DeviceRole) {
+        if connectState[key] == .asking { connectState[key] = .unreachable }
+        if let a = awaiting[role], Bluetooth.sameAddress(a.address, key), Date() >= a.deadline { awaiting[role] = nil }
+    }
+
+    /// After a device-list refresh: heal pinned rows from the live devices (a device pinned from the
+    /// paired-Bluetooth list only learns its real UID and name when it first connects), drop the
+    /// "connecting…" state for anything that showed up, and select a device we were waiting for.
+    private func devicesSettled() {
+        var healed = pins
+        var changed = false
+        for i in healed.indices {
+            let list = healed[i].role == .output ? outputs : inputs
+            guard let d = list.first(where: { MenuDevice.sameUID($0.uid, healed[i].uid) }),
+                  healed[i].uid != d.uid || healed[i].name != d.name else { continue }
+            Log.info("menu: pinned \(healed[i].name) is \(d.name) (\(d.uid))")
+            healed[i].uid = d.uid
+            healed[i].name = d.name
+            changed = true
+        }
+        if changed { pins = healed; pinStore.save(pins) }
+
+        let here = Set((outputs + inputs).compactMap { Bluetooth.address(fromDeviceUID: $0.uid)?.lowercased() })
+        for key in connectState.keys where here.contains(key) { connectState[key] = nil }
+
+        for (role, want) in awaiting {
+            let list = role == .output ? outputs : inputs
+            guard let d = list.first(where: { device in
+                Bluetooth.address(fromDeviceUID: device.uid).map { Bluetooth.sameAddress($0, want.address) } ?? false
+            }) else { continue }
+            awaiting[role] = nil
+            Log.info("menu: \(d.name) arrived; selecting it as the \(role.rawValue)")
+            if role == .output { selectOutput(d) } else { selectInput(d) }
+        }
     }
 
     // MARK: Stage (screen share)
@@ -415,10 +574,6 @@ final class AppModel: ObservableObject {
 
     private func save() {
         do { try store.save(graph) } catch { Log.warn("save graph: \(error)") }
-    }
-
-    func reconnect() {
-        engine.reconnectDesiredOutputIfBluetooth()
     }
 
     func rebuildRouting() {
@@ -593,6 +748,7 @@ final class AppModel: ObservableObject {
                     if self.outputs != outs { self.outputs = outs }
                     if self.inputs != ins { self.inputs = ins }
                     if let volume { self.applyHubVolume(volume.0, muted: volume.1) }
+                    self.devicesSettled()
                 }
             } while hal.devicesAgain
             hal.devicesBusy = false

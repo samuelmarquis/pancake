@@ -5,8 +5,8 @@ import SwiftUI
 /// The menu bar panel, styled after macOS's own Sound menu (see the reference in the repo):
 /// a title, a volume slider, then Output and Input sections of device rows with a circular
 /// device glyph that fills blue when selected. Each section carries one lock that pins whatever
-/// is selected in it. Rendered in a `.window`-style MenuBarExtra so it's real SwiftUI, not an
-/// NSMenu.
+/// is selected in it, and a pin per row that keeps a device listed even when it's away.
+/// Rendered in a `.window`-style MenuBarExtra so it's real SwiftUI, not an NSMenu.
 struct MenuContent: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
@@ -25,63 +25,10 @@ struct MenuContent: View {
             }
 
             Divider().padding(.vertical, 2)
-
-            // OUTPUT
-            SectionHeader(title: "Output",
-                          locked: model.lockOutput,
-                          lockHelp: model.lockOutput
-                            ? "Locked: holding this output. Won't auto-switch to another device that connects; if it disconnects you get silence, not the speakers."
-                            : "Unlocked: follows the system default output (AirPods connecting switch to them).",
-                          toggle: { model.toggleOutputLock() })
-            if model.menuOutputs.isEmpty {
-                EmptyRow(text: "No output devices")
-            }
-            ForEach(model.menuOutputs) { item in
-                if !item.present && item.isBluetooth {
-                    // Absent Bluetooth: a real reconnect button, not a decorative icon on a row whose
-                    // whole width quietly does the same thing.
-                    ReconnectRow(item: item,
-                                 glyph: Self.outputGlyph(item),
-                                 selected: item.uid == model.desiredOutputUID,
-                                 action: { model.reconnect() })
-                } else {
-                    MenuRow(action: { model.select(item) }) {
-                        DeviceLabel(glyph: Self.outputGlyph(item),
-                                    name: item.name,
-                                    subtitle: item.present ? nil : "not connected",
-                                    battery: item.battery,
-                                    selected: item.uid == model.desiredOutputUID,
-                                    dimmed: !item.present,
-                                    trailing: nil)
-                    }
-                    .disabled(!item.present)
-                }
-            }
+            DeviceSection(model: model, role: .output)
 
             Divider().padding(.vertical, 2)
-
-            // INPUT
-            SectionHeader(title: "Input",
-                          locked: model.lockInput,
-                          lockHelp: model.lockInput
-                            ? "Locked: pinning this as the system input so nothing (like AirPods on connect) can steal it and drag Bluetooth into low-quality call mode."
-                            : "Unlocked: this mic feeds Pancake Mic, but the system default input is left alone.",
-                          toggle: { model.toggleInputLock() })
-            if model.menuInputs.isEmpty {
-                EmptyRow(text: "No input devices")
-            }
-            ForEach(model.menuInputs) { item in
-                MenuRow(action: { model.selectInput(item) }) {
-                    DeviceLabel(glyph: "mic.fill",
-                                name: item.name,
-                                subtitle: item.present ? nil : "not connected",
-                                battery: [],
-                                selected: item.uid == model.desiredInputUID,
-                                dimmed: !item.present,
-                                trailing: nil)
-                }
-                .disabled(!item.present)
-            }
+            DeviceSection(model: model, role: .input)
 
             Divider().padding(.vertical, 2)
             StageSection(model: model)
@@ -107,7 +54,11 @@ struct MenuContent: View {
         }
         .padding(8)
         .frame(width: 300)
-        .onAppear { model.refreshLaunchAtLogin() }
+        .onAppear {
+            model.refreshLaunchAtLogin()
+            // Cheap, and it's what gives a Bluetooth row its real icon (earbuds vs speaker).
+            model.refreshPairedBluetooth()
+        }
     }
 
     /// Open the routing window. We're an `.accessory` app (no Dock icon), so nudge ourselves to the
@@ -120,14 +71,6 @@ struct MenuContent: View {
         GraphWindow.prepareToShow()
         openWindow(id: "graph")
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    static func outputGlyph(_ item: MenuOutput) -> String {
-        if item.isBluetooth { return "airpodspro" }
-        let n = item.name.lowercased()
-        if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
-        if n.contains("display") || n.contains("studio") || n.contains("pro xdr") { return "display" }
-        return "hifispeaker.fill"
     }
 }
 
@@ -158,13 +101,70 @@ private struct VolumeSlider: View {
     }
 }
 
-// MARK: - Section header with a lock
+// MARK: - A device section (Output or Input)
 
+/// One half of the menu. The rows are every device that's here plus the ones pinned to this list
+/// that aren't — a pinned Bluetooth row is a button that goes and gets the device, which is also how
+/// you take it back from a phone that's holding it. The `+` in the header pins something that isn't
+/// here to pin from the list itself: anything already paired in Bluetooth.
+private struct DeviceSection: View {
+    @ObservedObject var model: AppModel
+    let role: DeviceRole
+    @State private var picking = false
+
+    private var rows: [MenuDevice] { role == .output ? model.menuOutputs : model.menuInputs }
+    private var selectedUID: String? { role == .output ? model.desiredOutputUID : model.desiredInputUID }
+    private var locked: Bool { role == .output ? model.lockOutput : model.lockInput }
+
+    private var lockHelp: String {
+        switch (role, locked) {
+        case (.output, true):
+            return "Locked: holding this output. Won't auto-switch to another device that connects; if it disconnects you get silence, not the speakers."
+        case (.output, false):
+            return "Unlocked: follows the system default output (AirPods connecting switch to them)."
+        case (.input, true):
+            return "Locked: pinning this as the system input so nothing (like AirPods on connect) can steal it and drag Bluetooth into low-quality call mode."
+        case (.input, false):
+            return "Unlocked: this mic feeds Pancake Mic, but the system default input is left alone."
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: role.title,
+                          locked: locked,
+                          lockHelp: lockHelp,
+                          toggleLock: { role == .output ? model.toggleOutputLock() : model.toggleInputLock() },
+                          picking: $picking,
+                          pickHelp: "Pin a paired Bluetooth device to the \(role.title) list")
+
+            if rows.isEmpty {
+                EmptyRow(text: "No \(role.rawValue) devices")
+            }
+            ForEach(rows) { item in
+                DeviceRow(model: model, item: item, selected: isSelected(item))
+            }
+
+            if picking {
+                PinPicker(model: model, role: role, showing: $picking)
+            }
+        }
+    }
+
+    private func isSelected(_ item: MenuDevice) -> Bool {
+        guard let selectedUID else { return false }
+        return MenuDevice.sameUID(item.uid, selectedUID)
+    }
+}
+
+/// A section title, the "pin a device" toggle, and the lock that holds the section's selection.
 private struct SectionHeader: View {
     let title: String
     let locked: Bool
     let lockHelp: String
-    let toggle: () -> Void
+    let toggleLock: () -> Void
+    @Binding var picking: Bool
+    let pickHelp: String
 
     var body: some View {
         HStack(spacing: 4) {
@@ -172,7 +172,17 @@ private struct SectionHeader: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             Spacer()
-            Button(action: toggle) {
+            Button(action: { picking.toggle() }) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(picking ? Color.accentColor : Color.secondary)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(picking ? Color.accentColor.opacity(0.15) : Color.clear))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help(pickHelp)
+            Button(action: toggleLock) {
                 LockGlyph(locked: locked, color: locked ? Color.accentColor : Color.secondary)
                     .frame(width: 13, height: 15)
                     .frame(width: 22, height: 22)
@@ -209,65 +219,111 @@ private struct MenuRow<Label: View>: View {
     }
 }
 
-/// An absent Bluetooth output rendered as an actual reconnect button: it highlights on hover, the
-/// icon spins on click, and the subtitle flips to "reconnecting…" — so the click clearly registers.
-/// Reconnect is best-effort (a paired phone may be holding the AirPods): if the device comes back it
-/// turns into a normal present row on its own, so a row still sitting here after the timeout means the
-/// attempt failed — then the subtitle reads "unreachable". A per-click generation guards against a
-/// stale timer flipping a fresh attempt.
-private struct ReconnectRow: View {
-    let item: MenuOutput
-    let glyph: String
+/// One device. Clicking it selects it — or, when it isn't here and it's Bluetooth, asks for it and
+/// selects it when it arrives (the ↻ and "connecting…" say which is happening; a device that never
+/// comes ends up "unreachable"). The pin on the right keeps the device in this list for good.
+///
+/// The row is two buttons side by side rather than a pin nested inside the row's button: nesting
+/// buttons makes hit-testing a coin toss, and the pin must never be mistaken for "use this device".
+private struct DeviceRow: View {
+    @ObservedObject var model: AppModel
+    let item: MenuDevice
     let selected: Bool
-    let action: () -> Void
-
-    private static let timeout: TimeInterval = 8   // matches the engine's own retry cadence
-
-    private enum Phase { case idle, reconnecting, unreachable }
-    @State private var phase: Phase = .idle
     @State private var hover = false
-    @State private var spins = 0
-    @State private var attempt = 0
 
-    private var subtitle: String {
-        switch phase {
-        case .idle: return "not connected"
-        case .reconnecting: return "reconnecting…"
+    /// Absent, but it's Bluetooth: we can go and get it.
+    private var connectable: Bool { !item.present && item.address != nil }
+    private var connectState: AppModel.ConnectState? {
+        item.address.flatMap { model.connectState[$0.lowercased()] }
+    }
+
+    private var subtitle: String? {
+        guard !item.present else { return nil }
+        switch connectState {
+        case .asking: return "connecting…"
         case .unreachable: return "unreachable"
+        case nil: return "not connected"
         }
+    }
+
+    private var mark: RowMark {
+        guard connectable else { return .none }
+        return connectState == .asking ? .working : .connect
+    }
+
+    private var help: String {
+        if connectable { return "Connect \(item.name)" }
+        if !item.present { return "\(item.name) isn't connected" }
+        switch (item.role, selected) {
+        case (.output, _): return "Play to \(item.name)"
+        case (.input, false): return "Send \(item.name) to Pancake Mic"
+        case (.input, true): return "Stop sending \(item.name) to Pancake Mic"
+        }
+    }
+
+    private var glyph: String {
+        if let kind = item.kind { return kind == .speaker ? "hifispeaker.fill" : "airpodspro" }
+        if item.isBluetooth { return "airpodspro" }
+        if item.role == .input { return "mic.fill" }
+        let n = item.name.lowercased()
+        if n.contains("macbook") || n.contains("built-in") || n.contains("built in") { return "laptopcomputer" }
+        if n.contains("display") || n.contains("studio") || n.contains("pro xdr") { return "display" }
+        return "hifispeaker.fill"
     }
 
     var body: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.7)) { spins += 1 }
-            attempt += 1
-            let mine = attempt
-            phase = .reconnecting
-            action()
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) {
-                if mine == attempt, phase == .reconnecting { phase = .unreachable }
+        HStack(spacing: 0) {
+            Button(action: { model.select(item) }) {
+                DeviceLabel(glyph: glyph, name: item.name, subtitle: subtitle, battery: item.battery,
+                            selected: selected, dimmed: !item.present, mark: mark)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
-        } label: {
-            HStack(spacing: 0) {
-                DeviceLabel(glyph: glyph, name: item.name,
-                            subtitle: subtitle,
-                            battery: item.battery, selected: selected, dimmed: true, trailing: nil)
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(hover ? Color.accentColor : Color.secondary)
-                    .rotationEffect(.degrees(Double(spins) * 360))
-                    .padding(.trailing, 4)
+            .buttonStyle(.plain)
+            .disabled(!item.present && !connectable)
+            .help(help)
+
+            // The machine's own speakers/mic can't go anywhere, so there's nothing to pin them for.
+            if !item.onboard {
+                PinButton(pinned: item.pinned, showing: hover, name: item.name) { model.togglePin(item) }
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .background(RoundedRectangle(cornerRadius: 6).fill(hover ? Color.primary.opacity(0.10) : .clear))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(hover ? Color.primary.opacity(0.10) : .clear))
         .onHover { hover = $0 }
-        .help("Reconnect \(item.name)")
     }
 }
+
+/// Keeps a device in the menu whether or not it's connected. Invisible until you hover the row,
+/// unless the device is already pinned — then it stays lit, so you can see what's a resident.
+private struct PinButton: View {
+    let pinned: Bool
+    let showing: Bool
+    let name: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: pinned ? "pin.fill" : "pin")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(pinned ? Color.accentColor : (hover ? Color.primary : Color.secondary))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(pinned ? Color.accentColor.opacity(0.15) : Color.clear))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .opacity(pinned || showing ? 1 : 0)
+        .allowsHitTesting(pinned || showing)
+        .onHover { hover = $0 }
+        .help(pinned ? "Stop keeping \(name) in this menu" : "Keep \(name) in this menu, connected or not")
+    }
+}
+
+/// What sits at the right-hand end of a device label: nothing, the "I'll go and get it" arrow, or a
+/// spinner while we're getting it.
+private enum RowMark { case none, connect, working }
 
 private struct DeviceLabel: View {
     let glyph: String
@@ -276,7 +332,7 @@ private struct DeviceLabel: View {
     let battery: [Int]
     let selected: Bool
     let dimmed: Bool
-    let trailing: String?
+    var mark: RowMark = .none
 
     var body: some View {
         HStack(spacing: 10) {
@@ -302,11 +358,78 @@ private struct DeviceLabel: View {
 
             Spacer(minLength: 4)
 
-            if let trailing {
-                Image(systemName: trailing).font(.system(size: 11)).foregroundStyle(.secondary)
+            switch mark {
+            case .none:
+                EmptyView()
+            case .connect:
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            case .working:
+                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 16, height: 16)
             }
         }
         .opacity(dimmed ? 0.55 : 1)
+    }
+}
+
+// MARK: - Pinning something that isn't here
+
+/// Every paired Bluetooth audio device this section doesn't already list. These are ordinary device
+/// rows: clicking one connects it (and uses it once it arrives), and its pin keeps it in the list
+/// for good — so you can reach a device you've never pinned without pinning it first. Pairing
+/// something *new* is still System Settings' job, hence the last row.
+private struct PinPicker: View {
+    @ObservedObject var model: AppModel
+    let role: DeviceRole
+    /// The section's picker toggle, so the list can fold itself away from its own header.
+    @Binding var showing: Bool
+
+    private var candidates: [Bluetooth.Device] { model.pinnable(role) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            PickerHeader(showing: $showing)
+
+            if candidates.isEmpty {
+                EmptyRow(text: model.pairedBluetooth.isEmpty
+                         ? "No paired Bluetooth audio devices"
+                         : "Everything paired is already listed here")
+            }
+            ForEach(candidates) { d in
+                DeviceRow(model: model, item: model.row(for: d, role: role), selected: false)
+            }
+            MenuRow(action: { model.openBluetoothSettings() }) { ActionLabel("Bluetooth settings…", "gearshape") }
+        }
+        .padding(.leading, 10)
+        .onAppear { model.refreshPairedBluetooth() }
+    }
+}
+
+/// The picker's own title, which folds it away: a disclosure chevron and a hover highlight, so it
+/// reads as the control it is rather than a label.
+private struct PickerHeader: View {
+    @Binding var showing: Bool
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: { showing = false }) {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                Text("PAIRED BLUETOOTH")
+                    .font(.system(size: 10, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(hover ? Color.primary : Color.secondary)
+            .padding(.vertical, 2)
+            .padding(.horizontal, 6)
+            .background(RoundedRectangle(cornerRadius: 5).fill(hover ? Color.primary.opacity(0.08) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Hide the paired Bluetooth devices")
     }
 }
 
