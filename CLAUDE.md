@@ -134,8 +134,16 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   watcher ignores its own save (`g == graph`).
 - Only one engine at a time: the CLI `run` and the app both build an aggregate with the same UID and both
   pin the default output. Stop one before starting the other.
-- Bluetooth reconnect uses IOBluetooth `openConnection` (same as `blueutil --connect`). First use may
-  prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
+- **`IOBluetoothDevice.isConnected()` lies, and `openConnection()` believes it.** While a phone is
+  holding a pair of AirPods, this Mac reports them connected (a link exists; it isn't carrying audio)
+  and `openConnection()` then returns success in ~20 ms having done nothing — which is how "Connect"
+  used to report success and then time out. `Bluetooth.summon` is the real thing: it measures success
+  as "an audio device for this address is in the HAL", and escalates to `closeConnection()` +
+  `performSDPQuery` (an SDP query needs a live ACL link, so asking for one forces a genuine page;
+  macOS's audio driver then connects the profile). Steals AirPods off a phone mid-use in ~2 s.
+  `AVAudioRoutingArbiter` is *not* the answer — it completes with `defaultDeviceChanged=false`,
+  because arbitration is for a device idle on another Apple device, not one being used.
+  First use may prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
   output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
   on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
   the device once the HAL lists it (`awaiting`) and shows connecting/unreachable on the row.
