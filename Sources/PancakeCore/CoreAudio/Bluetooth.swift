@@ -78,17 +78,60 @@ public enum Bluetooth {
         }
     }
 
-    public static func isConnected(address: String) -> Bool {
-        IOBluetoothDevice(addressString: address)?.isConnected() ?? false
+    /// Is there a Core Audio device — the `:output` or `:input` half — for this address? That, and not
+    /// IOBluetooth's `isConnected()`, is what "connected" has to mean here: see `summon`.
+    public static func hasAudioDevice(address: String) -> Bool {
+        AudioDevice.all().contains { dev in
+            Self.address(fromDeviceUID: dev.uid).map { sameAddress($0, address) } ?? false
+        }
     }
 
-    /// Blocking — can sit there for several seconds while the device is summoned, so call it off the
-    /// main thread. Returns nil on success, otherwise a description.
+    /// Bring a paired device's audio here, escalating until it comes or the deadline passes. Returns
+    /// nil once an audio device for the address exists, otherwise what was tried. Blocking — call it
+    /// off the main thread.
+    ///
+    /// Why this is more than one call. **While a phone is holding a pair of AirPods, this Mac still
+    /// reports `isConnected() == true` for them** — a link exists, it just isn't carrying audio — and
+    /// in that state `openConnection()` returns success *instantly* having done nothing at all
+    /// (measured 2026-09-22: three asks, 20 ms each, "connected" every time, while the AirPods stayed
+    /// on the phone and no audio device ever appeared). That's why "Connect" in the menu could report
+    /// success and then time out as unreachable.
+    ///
+    /// The way through is to stop believing that link and force a real one: `closeConnection()` drops
+    /// our stale end, and an SDP query *requires* a live ACL connection, so asking for one makes
+    /// IOBluetooth page the device for real — after which macOS's own Bluetooth audio driver connects
+    /// the profile and the device appears. Live, with the phone holding them: 1.7 s.
     @discardableResult
-    public static func connect(address: String) -> String? {
+    public static func summon(address: String, deadline: TimeInterval = 12) -> String? {
         guard let device = IOBluetoothDevice(addressString: address) else { return "unknown device \(address)" }
-        if device.isConnected() { return nil }
-        let status = device.openConnection()
-        return status == kIOReturnSuccess ? nil : "openConnection failed: \(status)"
+        if hasAudioDevice(address: address) { return nil }
+        let end = Date().addingTimeInterval(deadline)
+        var tried: [String] = []
+
+        // The plain ask, for a device that's simply away (off, out of range, idle).
+        if !device.isConnected() {
+            tried.append("openConnection=\(device.openConnection())")
+            if waitForAudio(address: address, until: min(end, Date().addingTimeInterval(4))) { return nil }
+        }
+
+        // Still no audio: the link is stale, or the plain ask wasn't enough. Take it apart and rebuild
+        // it, for as long as the deadline allows.
+        while Date() < end {
+            let closed = device.closeConnection()
+            Thread.sleep(forTimeInterval: 0.75)   // the stale "connected" doesn't clear instantly
+            let sdp = device.performSDPQuery(nil)
+            tried.append("close=\(closed) sdp=\(sdp)")
+            Log.info("bluetooth: \(device.name ?? address) didn't come; dropped the stale link and paged it again")
+            if waitForAudio(address: address, until: min(end, Date().addingTimeInterval(5))) { return nil }
+        }
+        return "no audio device after \(tried.joined(separator: ", "))"
+    }
+
+    private static func waitForAudio(address: String, until: Date) -> Bool {
+        repeat {
+            if hasAudioDevice(address: address) { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < until
+        return hasAudioDevice(address: address)
     }
 }

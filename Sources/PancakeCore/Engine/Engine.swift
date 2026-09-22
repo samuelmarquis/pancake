@@ -180,7 +180,10 @@ public final class Engine {
         lastReconnectAttempt = Date()
         reconnectInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let failure = Bluetooth.connect(address: address)
+            // Shorter than the menu's: this one fires by itself, every `bluetoothReconnectInterval`
+            // while audio plays, and a long summon would mean pancake is permanently paging a device
+            // the user may have deliberately taken to their phone. A click is the aggressive one.
+            let failure = Bluetooth.summon(address: address, deadline: 6)
             self?.queue.async {
                 self?.reconnectInFlight = false
                 if let failure { Log.warn("bluetooth reconnect \(address): \(failure)") }

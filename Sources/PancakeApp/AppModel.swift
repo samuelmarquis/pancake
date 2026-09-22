@@ -365,7 +365,9 @@ final class AppModel: ObservableObject {
         Log.info("menu: asking Bluetooth for \(item.name)")
         let role = item.role, name = item.name
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let failure = Bluetooth.connect(address: address)
+            // Escalates on its own (`Bluetooth.summon`) and only returns once the device's audio is
+            // actually here — or it gave up. It can take several seconds; the row shows that.
+            let failure = Bluetooth.summon(address: address, deadline: Self.connectWindow - 1)
             Task { @MainActor in self?.connectReturned(key, role: role, name: name, failure: failure) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectWindow) { [weak self] in
@@ -375,8 +377,8 @@ final class AppModel: ObservableObject {
 
     private func connectReturned(_ key: String, role: DeviceRole, name: String, failure: String?) {
         guard let failure else {
-            // Connected as far as Bluetooth is concerned; the row clears when the HAL lists the device.
-            Log.info("connect \(name): connected (waiting for the HAL to list it)")
+            // The device's audio is on this machine; `devicesSettled` clears the row and selects it.
+            Log.info("connect \(name): here")
             return
         }
         Log.warn("connect \(name): \(failure)")
