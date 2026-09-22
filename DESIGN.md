@@ -274,6 +274,18 @@ tick and logged as `something set … re-asserted unity`. If that turns out to
 matter, the fix is to mirror the gesture into Pancake's own volume instead of
 fighting it — the same log line is where you'd find out.
 
+**The hold must never be a loop (2026-09-22).** Answering every change notification
+is how you get a write war: AirPods connect, macOS restores the level it remembers
+for them, our unity write provokes another restore, and so on — measured **2361
+volume writes in 32 seconds**, during which the IOProc was writing real audio into
+headphones that played *nothing*, after which they dropped off Bluetooth entirely.
+A volume write to a Bluetooth device is an AVRCP command sharing the link with the
+audio; flood it and there's no audio left. So the hold is bounded: changes collapse
+into one deferred write (0.75 s), and four re-asserts inside 30 s means something
+else owns this device's volume — pancake stops pushing, logs it, and tries once
+more a minute later. Losing the hold costs a quieter device; winning it by force
+costs the audio.
+
 ---
 
 ## Milestones

@@ -56,6 +56,10 @@ final class AppModel: ObservableObject {
     /// How long we wait for a summoned device before calling it unreachable. `openConnection` itself
     /// can sit for several seconds, and the HAL takes a moment more to list the device.
     private static let connectWindow: TimeInterval = 12
+    /// When the user last moved the volume slider, and how long the hardware's own reports stay stale
+    /// after that — see `applyHubVolume`.
+    private var lastVolumeWrite = Date.distantPast
+    private static let volumeEchoWindow: TimeInterval = 0.4
     /// The desired routing graph. Published so the visual editor re-renders when it changes —
     /// whether the change came from the menu, the editor itself, the CLI, or a hand-edit of the file.
     @Published private(set) var graph: Graph
@@ -552,6 +556,7 @@ final class AppModel: ObservableObject {
     /// write happens on `queue`, latest value wins.
     func setHubVolume(_ v: Double) {
         hubVolume = v
+        lastVolumeWrite = Date()
         let hal = self.hal, hubUID = engine.configuration.hubUID, queue = self.queue
         queue.async {
             let writerQueued = hal.pendingVolume != nil
@@ -798,8 +803,14 @@ final class AppModel: ObservableObject {
         return (hub.outputVolumeScalar, hub.outputMuted ?? false)
     }
 
+    /// A drag produces far more values than the HAL can take, so writes are coalesced — which means
+    /// the level the device reports back mid-drag is from two or three values ago. Publishing that
+    /// yanks the knob backwards under the user's finger, at 60 Hz: the jerk you feel when you drag the
+    /// slider. While the user is driving (and briefly after, so the last write can land), ours is the
+    /// newer truth and the hardware's report is ignored. Mute is never in doubt, so it always applies.
     private func applyHubVolume(_ v: Float32?, muted: Bool) {
-        if let v, abs(Double(v) - hubVolume) > 0.001 { hubVolume = Double(v) }
         if hubMuted != muted { hubMuted = muted }
+        guard Date().timeIntervalSince(lastVolumeWrite) > Self.volumeEchoWindow else { return }
+        if let v, abs(Double(v) - hubVolume) > 0.001 { hubVolume = Double(v) }
     }
 }

@@ -444,7 +444,25 @@ public final class Engine {
         let name: String
         let saved: [UInt32: Float32]
         var listeners: [PropertyListener]
+        /// The fight (see `volumeChanged`): when the device puts its own level back, every re-assert
+        /// provokes the next one. These bound it.
+        var reassertsInWindow: [Date] = []
+        var pendingReassert: DispatchWorkItem?
+        var givenUp = false
+        /// Changes seen while we stayed out of it — the count says who was really doing the writing.
+        var observedWhileGivenUp = 0
     }
+
+    /// How long volume notifications pile up before we answer with one write. Answering each one is
+    /// how you send thousands of volume commands a second to a device that argues.
+    private static let volumeReassertDebounce: TimeInterval = 0.75
+    /// Re-asserts allowed inside `volumeFightWindow` before we conclude something else owns this
+    /// device's volume and stop pushing.
+    private static let volumeFightBudget = 4
+    private static let volumeFightWindow: TimeInterval = 30
+    /// After giving up, one more go this much later: the fight is usually a connect-time flurry, and
+    /// this is what keeps "gave up" from meaning "quiet forever".
+    private static let volumeFightRetry: TimeInterval = 60
 
     private var isRunning: Bool { if case .running = currentState { return true } else { return false } }
 
@@ -612,7 +630,7 @@ public final class Engine {
         for element in elements {
             let address = AudioObjectPropertyAddress(kAudioDevicePropertyVolumeScalar, scope: kAudioDevicePropertyScopeOutput, element: element)
             let uid = dev.uid
-            if let l = try? dev.id.addPropertyListener(address, queue: queue, handler: { [weak self] in self?.reassertVolumeHold(uid: uid) }) {
+            if let l = try? dev.id.addPropertyListener(address, queue: queue, handler: { [weak self] in self?.volumeChanged(uid: uid) }) {
                 listeners.append(l)
             }
         }
@@ -627,16 +645,63 @@ public final class Engine {
         } catch { Log.warn("volume hold: set \(dev.name) to unity: \(error)") }
     }
 
-    /// Something wrote the held device's volume. Our own write comes back through here too and
-    /// reads as unity, so that's a no-op; anything else gets re-asserted and logged.
+    /// Something wrote the held device's volume. Don't answer straight away: our own write comes back
+    /// through here, and a device that puts its own level back turns answer-every-notification into a
+    /// write storm. AirPods do exactly that when they connect — macOS restores the level it remembers
+    /// for them and our unity write provokes another restore. Measured 2026-09-22: **2361 volume
+    /// writes in 32 s**, during which the AirPods played nothing at all, and then dropped off
+    /// Bluetooth (a volume write to a Bluetooth device is an AVRCP command on the same link the audio
+    /// is on). So a burst collapses into one deferred write, and if the device keeps winning we stop
+    /// pushing and say so.
+    private func volumeChanged(uid: String) {
+        guard var held = heldVolumes[uid] else { return }
+        if held.givenUp {
+            held.observedWhileGivenUp += 1
+            heldVolumes[uid] = held
+            return
+        }
+        guard held.pendingReassert == nil else { return }   // an answer is already on its way
+        let work = DispatchWorkItem { [weak self] in self?.reassertVolumeHold(uid: uid) }
+        held.pendingReassert = work
+        heldVolumes[uid] = held
+        queue.asyncAfter(deadline: .now() + Self.volumeReassertDebounce, execute: work)
+    }
+
+    /// The deferred answer: if the device still isn't at unity, put it back — unless it has won this
+    /// argument too many times lately, in which case leave it alone (Pancake's own volume still
+    /// works, so the user isn't stuck) and try again in a minute.
     private func reassertVolumeHold(uid: String) {
-        guard let held = heldVolumes[uid], let dev = try? AudioDevice(id: held.deviceID), dev.uid == uid else { return }
+        guard var held = heldVolumes[uid] else { return }
+        held.pendingReassert = nil
+        defer { heldVolumes[uid] = held }
+        guard let dev = try? AudioDevice(id: held.deviceID), dev.uid == uid else { return }
+        let now = Date()
+        held.reassertsInWindow.removeAll { now.timeIntervalSince($0) > Self.volumeFightWindow }
         let off = dev.outputVolumes().filter { abs($0.value - 1) >= 0.001 }
-        guard !off.isEmpty else { return }
+        guard !off.isEmpty else { return }   // it's at unity after all: our write stuck, or it relented
+        guard held.reassertsInWindow.count < Self.volumeFightBudget else {
+            held.givenUp = true
+            held.observedWhileGivenUp = 0
+            Log.warn("\(held.name) keeps putting its own volume back (\(Self.volumeFightBudget)× in \(Int(Self.volumeFightWindow))s); leaving it at \(Self.describe(off)) rather than flooding it with writes — Pancake's own volume still works")
+            queue.asyncAfter(deadline: .now() + Self.volumeFightRetry) { [weak self] in self?.resumeVolumeHold(uid: uid) }
+            return
+        }
+        held.reassertsInWindow.append(now)
         do {
             try dev.setOutputVolume(1, elements: off.keys.sorted())
             Log.info("something set \(held.name) hardware volume to \(Self.describe(off)); re-asserted unity")
         } catch { Log.warn("volume hold: re-assert \(held.name): \(error)") }
+    }
+
+    /// Have another go after a fight, so a connect-time flurry doesn't cost the hold for good.
+    private func resumeVolumeHold(uid: String) {
+        guard var held = heldVolumes[uid], held.givenUp else { return }
+        Log.info("\(held.name): trying the volume hold again (\(held.observedWhileGivenUp) change(s) went by meanwhile)")
+        held.givenUp = false
+        held.reassertsInWindow = []
+        held.observedWhileGivenUp = 0
+        heldVolumes[uid] = held
+        volumeChanged(uid: uid)   // through the debounce, like any other change
     }
 
     /// Stop holding. `leavingAt: nil` puts the saved values back (the device is no longer our
@@ -644,6 +709,7 @@ public final class Engine {
     /// system output, so it should sound exactly as loud as it did a moment ago).
     private func releaseVolumeHold(uid: String, leavingAt level: Float32?) {
         guard let held = heldVolumes.removeValue(forKey: uid) else { return }
+        held.pendingReassert?.cancel()
         held.listeners.forEach { $0.remove() }
         guard let dev = try? AudioDevice(id: held.deviceID), dev.uid == uid else {
             Log.debug("volume hold: \(held.name) is gone; nothing to put back")

@@ -115,6 +115,11 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
    engine holds the *routed* physical output's hardware volume at unity while it's the output (the phone
    rewrites the AirPods' otherwise), puts the old value back when it isn't, leaves it at Pancake's level
    on quit, and logs every write. `DESIGN.md` § Gain. Nothing else touches a physical volume.
+   **And the hold is bounded** — changes collapse into one deferred write and four re-asserts in 30 s
+   makes it give up (retrying a minute later). Answering every notification was a write war with
+   whatever restores an AirPods' remembered volume on connect: 2361 writes in 32 s, no audio at all
+   from the AirPods while it ran, then the link dropped. A volume write to a Bluetooth device is an
+   AVRCP command on the link the audio is on.
 3. **The IOProc is C and touches nothing Swift.** Matrices are freed only after the cycle counter
    has moved past the swap (see `drainRetiredLater`) or after IO is stopped.
 4. **Rebuild, don't mutate, the aggregate.** And ignore `devicesChanged` when the relevant UID set
@@ -226,9 +231,10 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
 
 ## Not yet verified / next steps, in order
 
-0. Hold the routed physical output at unity while it's the hub's output, re-assert if something (the
-   phone) changes it, restore the old value on release/quit, log every write. This is the one deliberate
-   exception to "pancake never writes a physical volume" — `DESIGN.md` § Gain.
+0. ✅ **Hold the routed physical output at unity** while it's the hub's output, re-assert if something
+   (the phone) changes it, restore the old value on release/quit, log every write. The one deliberate
+   exception to "pancake never writes a physical volume" — `DESIGN.md` § Gain. Bounded since
+   2026-09-22 (the write war above); verified live, including the give-up and the retry.
 1. Bluetooth reconnect in anger: AirPods stolen by the phone, resume playback on the Mac, watch the log
    for "asking Bluetooth to reconnect" and whether they come back. May need the Bluetooth TCC prompt.
 2. ✅ **Start at login** — `make install-app` copies Pancake.app + PancakeStage.app to `~/Applications`
