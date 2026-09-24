@@ -87,8 +87,8 @@ public enum Bluetooth {
     }
 
     /// Bring a paired device's audio here, escalating until it comes or the deadline passes. Returns
-    /// nil once an audio device for the address exists, otherwise what was tried. Blocking — call it
-    /// off the main thread.
+    /// nil once an audio device for the address exists, otherwise what was tried. Blocking, and it
+    /// returns within `deadline` (plus a poll interval) — call it off the main thread.
     ///
     /// Why this is more than one call. **While a phone is holding a pair of AirPods, this Mac still
     /// reports `isConnected() == true` for them** — a link exists, it just isn't carrying audio — and
@@ -101,37 +101,127 @@ public enum Bluetooth {
     /// our stale end, and an SDP query *requires* a live ACL connection, so asking for one makes
     /// IOBluetooth page the device for real — after which macOS's own Bluetooth audio driver connects
     /// the profile and the device appears. Live, with the phone holding them: 1.7 s.
+    ///
+    /// Why nothing here blocks on IOBluetooth. A synchronous `openConnection()` sits for the whole of
+    /// bluetoothd's page — 15 s for an address that never answers, 20 s for the AirPods when they're
+    /// in the case — and `openConnection:withPageTimeout:` is ignored (measured 2026-09-24: asked for
+    /// 1 s and 3 s, blocked 15.4 s both times). A 12 s deadline can't bound that, so the menu was
+    /// saying "unreachable" while the page was still running, and a second click queued a second
+    /// page behind it. So pages and SDP queries go out asynchronously (the completion arrives on the
+    /// main run loop), and this polls the HAL for the audio device at its own pace. A page that
+    /// bluetoothd is still running after we've given up can still land the device — the AirPods
+    /// arrived 28 s after the first click on 2026-09-24 — and callers treat that arrival as the
+    /// answer to their ask (`AppModel.awaiting`, the engine's rebuild).
+    ///
+    /// One ask per device at a time, process-wide: the menu and the engine are both allowed to ask,
+    /// and a second caller waits for the first instead of paging on top of it.
     @discardableResult
     public static func summon(address: String, deadline: TimeInterval = 12) -> String? {
         guard let device = IOBluetoothDevice(addressString: address) else { return "unknown device \(address)" }
-        if hasAudioDevice(address: address) { return nil }
         let end = Date().addingTimeInterval(deadline)
+        guard let link = Link.claim(address: address, until: end) else {
+            return hasAudioDevice(address: address) ? nil : "an earlier ask for it is still in progress"
+        }
+        defer { link.release() }
+        if hasAudioDevice(address: address) { return nil }
+
+        let name = device.name ?? address
         var tried: [String] = []
+        // A link that's up before we've asked for anything is the stale one: escalate at once. A link
+        // that comes up *during* the ask gets `linkGrace` for the audio driver to follow it.
+        var linkSince: Date? = device.isConnected() ? .distantPast : nil
+        var lastPage = Date.distantPast
 
-        // The plain ask, for a device that's simply away (off, out of range, idle).
-        if !device.isConnected() {
-            tried.append("openConnection=\(device.openConnection())")
-            if waitForAudio(address: address, until: min(end, Date().addingTimeInterval(4))) { return nil }
-        }
+        while true {
+            if hasAudioDevice(address: address) { return nil }
+            let now = Date()
+            guard now < end else { break }
 
-        // Still no audio: the link is stale, or the plain ask wasn't enough. Take it apart and rebuild
-        // it, for as long as the deadline allows.
-        while Date() < end {
-            let closed = device.closeConnection()
-            Thread.sleep(forTimeInterval: 0.75)   // the stale "connected" doesn't clear instantly
-            let sdp = device.performSDPQuery(nil)
-            tried.append("close=\(closed) sdp=\(sdp)")
-            Log.info("bluetooth: \(device.name ?? address) didn't come; dropped the stale link and paged it again")
-            if waitForAudio(address: address, until: min(end, Date().addingTimeInterval(5))) { return nil }
+            if device.isConnected() {
+                if linkSince == nil { linkSince = now }
+                if now.timeIntervalSince(linkSince!) >= linkGrace {
+                    let closed = device.closeConnection()
+                    Thread.sleep(forTimeInterval: 0.75)   // the stale "connected" doesn't clear instantly
+                    let sdp = link.page { device.performSDPQuery($0) }
+                    tried.append("close=\(describe(closed)) sdp=\(describe(sdp))")
+                    Log.info("bluetooth: \(name) didn't come; dropped the stale link and paged it again")
+                    linkSince = nil
+                    lastPage = Date()
+                }
+            } else {
+                linkSince = nil
+                if !link.pagePending, now.timeIntervalSince(lastPage) >= 2 {
+                    // The plain ask, for a device that's simply away (off, out of range, idle). If
+                    // bluetoothd won't even start one, nothing below will do better.
+                    let r = link.page { device.openConnection($0) }
+                    tried.append("page=\(describe(r))")
+                    if r != kIOReturnSuccess { break }
+                    lastPage = now
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.25)
         }
+        if hasAudioDevice(address: address) { return nil }
+        if let status = link.lastPageStatus { tried.append("last page ended \(describe(status))") }
+        else if link.pagePending { tried.append("bluetoothd is still paging it") }
         return "no audio device after \(tried.joined(separator: ", "))"
     }
 
-    private static func waitForAudio(address: String, until: Date) -> Bool {
-        repeat {
-            if hasAudioDevice(address: address) { return true }
-            Thread.sleep(forTimeInterval: 0.25)
-        } while Date() < until
-        return hasAudioDevice(address: address)
+    /// How long a link that appeared during an ask gets to grow an audio device before we decide
+    /// it's the stale kind and take it apart. The real thing follows in 1–2 s.
+    private static let linkGrace: TimeInterval = 3
+
+    private static func describe(_ r: IOReturn) -> String {
+        switch r {
+        case kIOReturnSuccess: return "ok"
+        case kIOReturnTimeout: return "timed out"
+        default: return "0x" + String(UInt32(bitPattern: r), radix: 16)
+        }
+    }
+
+    /// The in-flight ask for one address: the lock that serialises callers, and the target that
+    /// IOBluetooth tells when a page it issued for us has ended (on the main run loop — which is
+    /// why nothing here waits for it; `summon` polls the HAL instead).
+    private final class Link: NSObject {
+        private static let lock = NSCondition()
+        private static var links: [String: Link] = [:]   // by lowercased address; kept once created
+
+        private var claimed = false
+        private var pending = false
+        private var status: IOReturn?
+
+        /// Wait for any earlier ask for this address to finish, up to `until`. Nil if it hasn't by then.
+        static func claim(address: String, until: Date) -> Link? {
+            let key = address.lowercased()
+            lock.lock(); defer { lock.unlock() }
+            let link = links[key] ?? { let l = Link(); links[key] = l; return l }()
+            while link.claimed {
+                guard lock.wait(until: until) else { return nil }
+            }
+            link.claimed = true
+            return link
+        }
+
+        func release() {
+            Self.lock.lock(); claimed = false; Self.lock.broadcast(); Self.lock.unlock()
+        }
+
+        /// Issue an asynchronous page (open connection, SDP query) with this as the completion target.
+        func page(_ issue: (Link) -> IOReturn) -> IOReturn {
+            Self.lock.lock(); pending = true; status = nil; Self.lock.unlock()
+            let r = issue(self)
+            if r != kIOReturnSuccess { Self.lock.lock(); pending = false; Self.lock.unlock() }
+            return r
+        }
+
+        var pagePending: Bool { Self.lock.lock(); defer { Self.lock.unlock() }; return pending }
+        var lastPageStatus: IOReturn? { Self.lock.lock(); defer { Self.lock.unlock() }; return status }
+
+        @objc func connectionComplete(_ device: IOBluetoothDevice, status s: IOReturn) {
+            Self.lock.lock(); pending = false; status = s; Self.lock.unlock()
+        }
+        @objc func sdpQueryComplete(_ device: IOBluetoothDevice, status s: IOReturn) {
+            Self.lock.lock(); pending = false; status = s; Self.lock.unlock()
+        }
     }
 }

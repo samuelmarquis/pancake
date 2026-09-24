@@ -53,9 +53,13 @@ final class AppModel: ObservableObject {
     /// A Bluetooth device we asked for and mean to select once the HAL lists it, per section.
     /// Clicking a row that isn't here means "play here" — it just has to arrive first.
     private var awaiting: [DeviceRole: (address: String, deadline: Date)] = [:]
-    /// How long we wait for a summoned device before calling it unreachable. `openConnection` itself
-    /// can sit for several seconds, and the HAL takes a moment more to list the device.
+    /// How long the row says "connecting…" before it says unreachable — the summon's own deadline.
     private static let connectWindow: TimeInterval = 12
+    /// How long after a click an arrival still counts as the answer to it. bluetoothd keeps paging a
+    /// device for 15–20 s after we've stopped waiting (`Bluetooth.summon`), and a device that comes
+    /// into reach late still comes: on 2026-09-24 the AirPods arrived 28 s after the click. Selecting
+    /// them then is what the click meant; the user picking something else in the meantime cancels it.
+    private static let arrivalGrace: TimeInterval = 45
     /// When the user last moved the volume slider, and how long the hardware's own reports stay stale
     /// after that — see `applyHubVolume`.
     private var lastVolumeWrite = Date.distantPast
@@ -361,17 +365,19 @@ final class AppModel: ObservableObject {
         let key = address.lowercased()
         guard connectState[key] != .asking else { return }   // already on its way
         connectState[key] = .asking
-        awaiting[item.role] = (address: address, deadline: Date().addingTimeInterval(Self.connectWindow))
+        awaiting[item.role] = (address: address, deadline: Date().addingTimeInterval(Self.arrivalGrace))
         Log.info("menu: asking Bluetooth for \(item.name)")
         let role = item.role, name = item.name
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Escalates on its own (`Bluetooth.summon`) and only returns once the device's audio is
-            // actually here — or it gave up. It can take several seconds; the row shows that.
-            let failure = Bluetooth.summon(address: address, deadline: Self.connectWindow - 1)
+            // Escalates on its own (`Bluetooth.summon`) and returns once the device's audio is
+            // actually here — or at its deadline. The row shows "connecting…" meanwhile.
+            let failure = Bluetooth.summon(address: address, deadline: Self.connectWindow)
             Task { @MainActor in self?.connectReturned(key, role: role, name: name, failure: failure) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectWindow) { [weak self] in
-            Task { @MainActor in self?.connectWindowClosed(key, role: role) }
+        // Safety net only: the summon returns by its deadline, but nothing should be able to leave a
+        // row saying "connecting…" forever.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectWindow + 3) { [weak self] in
+            Task { @MainActor in self?.connectWindowClosed(key) }
         }
     }
 
@@ -381,15 +387,15 @@ final class AppModel: ObservableObject {
             Log.info("connect \(name): here")
             return
         }
+        // The row says unreachable, but `awaiting` stays: bluetoothd may still be paging, and a late
+        // arrival is still what the click asked for (`arrivalGrace`).
         Log.warn("connect \(name): \(failure)")
         connectState[key] = .unreachable
-        if let a = awaiting[role], Bluetooth.sameAddress(a.address, key) { awaiting[role] = nil }
     }
 
-    /// The device never showed up. Stop claiming to be working on it, and stop meaning to select it.
-    private func connectWindowClosed(_ key: String, role: DeviceRole) {
+    /// The device didn't show up while we were asking. Stop claiming to be working on it.
+    private func connectWindowClosed(_ key: String) {
         if connectState[key] == .asking { connectState[key] = .unreachable }
-        if let a = awaiting[role], Bluetooth.sameAddress(a.address, key), Date() >= a.deadline { awaiting[role] = nil }
     }
 
     /// After a device-list refresh: heal pinned rows from the live devices (a device pinned from the
@@ -413,6 +419,7 @@ final class AppModel: ObservableObject {
         for key in connectState.keys where here.contains(key) { connectState[key] = nil }
 
         for (role, want) in awaiting {
+            if Date() >= want.deadline { awaiting[role] = nil; continue }   // too late to be the answer to that click
             let list = role == .output ? outputs : inputs
             guard let d = list.first(where: { device in
                 Bluetooth.address(fromDeviceUID: device.uid).map { Bluetooth.sameAddress($0, want.address) } ?? false

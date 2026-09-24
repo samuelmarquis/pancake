@@ -143,6 +143,13 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   macOS's audio driver then connects the profile). Steals AirPods off a phone mid-use in ~2 s.
   `AVAudioRoutingArbiter` is *not* the answer — it completes with `defaultDeviceChanged=false`,
   because arbitration is for a device idle on another Apple device, not one being used.
+  **And nothing in `summon` blocks on IOBluetooth**: a synchronous `openConnection()` sits for the
+  whole of bluetoothd's page (15 s for an address that never answers, 20 s for AirPods in their case)
+  and `openConnection:withPageTimeout:` is ignored (measured 2026-09-24: asked 1 s and 3 s, got
+  15.4 s both). Pages go out asynchronously (completion on the main run loop), the summon polls the
+  HAL and returns at its deadline, asks are serialised per address process-wide, and a page that
+  bluetoothd finishes *after* we gave up still lands the device — the menu selects a late arrival
+  for 45 s after the click (`AppModel.arrivalGrace`), the engine's rebuild just uses it.
   First use may prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
   output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
   on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
@@ -243,8 +250,11 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
    (the phone) changes it, restore the old value on release/quit, log every write. The one deliberate
    exception to "pancake never writes a physical volume" — `DESIGN.md` § Gain. Bounded since
    2026-09-22 (the write war above); verified live, including the give-up and the retry.
-1. Bluetooth reconnect in anger: AirPods stolen by the phone, resume playback on the Mac, watch the log
-   for "asking Bluetooth to reconnect" and whether they come back. May need the Bluetooth TCC prompt.
+1. ✅ Bluetooth reconnect in anger — seen overnight 2026-09-24: with the phone using the AirPods and
+   audio playing on the Mac, the engine's ask lands them in ~2 s, the engine rebuilds onto them, and
+   the phone takes them back ~5 s later (three `something set AirPods hardware volume` writes from the
+   phone in between). That's iOS's call; the ask itself works. Worth knowing: while the phone is
+   *actively* using them, every Mac sound that clears `signalThreshold` yanks them for those 5 s.
 2. ✅ **Start at login** — `make install-app` copies Pancake.app + PancakeStage.app to `~/Applications`
    (stable paths, no sudo), and the menu's **Start at login** toggle registers the menu app via
    `SMAppService.mainApp`. The Stage is *not* a login item — the menu launches it on demand, so the
