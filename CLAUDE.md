@@ -157,9 +157,15 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   LE peripheral leg, which is presumably why it works when paging doesn't); calling it answers
   `Missing entitlement: com.apple.bluetooth.system`, which nothing we can sign gets. The Bluetooth
   settings App Intents are deep links only (no connect action), so Shortcuts is no route either. The
-  only remaining way to "do what Settings does" is UI-scripting the Bluetooth menu extra
-  (Accessibility permission, fragile across releases) — not done; the picker's "Bluetooth settings…"
-  row is the fallback.
+  Public CoreBluetooth *does* reach the AirPods' LE side with no entitlement (`IOBluetoothDevice
+  .peripheral` gives the `CBPeripheral`; `retrievePeripherals(withIdentifiers:)` + `connect` succeeds
+  at once, the system already holds that link) — but the GATT surface is read-only identity data
+  (model, colour, bud side, battery) plus the UARP firmware control point: no command channel, so an
+  LE link moves no audio. And AACP over classic L2CAP (PSM 0x1001, the takeover route Linux
+  reimplementations use) is out too: `openL2CAPChannelSync` returns `kIOReturnError` for *every* PSM
+  from an unentitled process, SDP included. The only remaining way to "do what Settings does" is
+  UI-scripting the Bluetooth menu extra (Accessibility permission, fragile across releases) — not
+  done; the picker's "Bluetooth settings…" row is the fallback.
   First use may prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
   output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
   on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
