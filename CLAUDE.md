@@ -150,6 +150,16 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   HAL and returns at its deadline, asks are serialised per address process-wide, and a page that
   bluetoothd finishes *after* we gave up still lands the device — the menu selects a late arrival
   for 45 s after the click (`AppModel.arrivalGrace`), the engine's rebuild just uses it.
+  **What System Settings' Connect does is not available to us** (2026-09-24). A classic page is the
+  only ask public IOBluetooth has, and there are states where AirPods don't answer one — seen live:
+  freshly switched to the phone and in the ears, our page timed out at 20 s while Settings connected
+  them at once. Settings goes through CoreBluetooth's private `CBController`/`CBConnection` (it has an
+  LE peripheral leg, which is presumably why it works when paging doesn't); calling it answers
+  `Missing entitlement: com.apple.bluetooth.system`, which nothing we can sign gets. The Bluetooth
+  settings App Intents are deep links only (no connect action), so Shortcuts is no route either. The
+  only remaining way to "do what Settings does" is UI-scripting the Bluetooth menu extra
+  (Accessibility permission, fragile across releases) — not done; the picker's "Bluetooth settings…"
+  row is the fallback.
   First use may prompt for Bluetooth permission for the app. Two owners, deliberately: the engine asks only for the
   output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
   on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
