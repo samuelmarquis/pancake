@@ -260,6 +260,17 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   sample-exact unit test (`RecorderRingTests`) that pumps known audio through `pk_ioproc` and reads it
   back. In the UI: add a Recorder node, wire a source in, hit record.
 
+- **What running costs when nothing is playing, measured 2026-10-01.** The engine's IO never stops,
+  and coreaudiod pays for it: 1.6% with no pancake, 9.8% for an aggregate of *just the built-in
+  speakers* (the speaker DSP runs whenever the speakers do), 11.4% adding the built-in mic, 14.9%
+  for the full five-device aggregate, 14.3% for the app (process taps cost nothing measurable). Over
+  17 days coreaudiod averaged 9.4% of a core. Same root cause: coreaudiod holds
+  `PreventUserIdleSystemSleep` (`…pancake.engine.aggregate…preventuseridlesleep`) for as long as the
+  engine runs, so the Mac never idle-sleeps. The fix would be idling the IO when no other process is
+  running IO on Pancake / Pancake Mic (`kAudioProcessPropertyDevices` + `IsRunningOutput/Input` say
+  who is — our own aggregate makes `DeviceIsRunningSomewhere` useless) at the price of a start-up
+  gap on the first sound. Not done; see next steps.
+
 ## Not yet verified / next steps, in order
 
 0. ✅ **Hold the routed physical output at unity** while it's the hub's output, re-assert if something
