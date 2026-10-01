@@ -269,7 +269,7 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   engine runs, so the Mac never idle-sleeps. The fix would be idling the IO when no other process is
   running IO on Pancake / Pancake Mic (`kAudioProcessPropertyDevices` + `IsRunningOutput/Input` say
   who is — our own aggregate makes `DeviceIsRunningSomewhere` useless) at the price of a start-up
-  gap on the first sound. Not done; see next steps.
+  gap on the first sound. Not done — next steps, item 7.
 
 ## Not yet verified / next steps, in order
 
@@ -319,6 +319,13 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
    readout and a settings popover (sliders edit `BusParams` live). Liquid-glass buttons where the CLT SDK has them; top bar sits on the traffic-light row
    (its legend drops out when the window is narrow); the window opens fitting a tidied graph and shrinks
    much smaller. Remaining polish if wanted: zoom, multi-select, marquee.
+
+7. **Idle the IO in silence — deferred by the owner (2026-10-01), revisit only if it becomes a
+   problem.** Always-on IO costs coreaudiod ~13% of a core at idle and blocks idle system sleep
+   (numbers under "Verified on this machine"). The owner runs `caffeinate` anyway, so neither bites
+   today. Signs it has started to matter: battery complaints, the Mac not sleeping on a machine
+   without `caffeinate`, or coreaudiod's idle share climbing past the measured ~14%. The design is
+   sketched in that same note; the cost is a start-up gap on the first sound after silence.
 
    Deliberately NOT done — **plugin (AU/VST/CLAP) inserts in the graph.** It would break invariant #3:
    the IOProc is pure C gain-routing plus our own DSP (no alloc/locks/ObjC/Swift), and hosting a plugin
