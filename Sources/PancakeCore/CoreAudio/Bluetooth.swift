@@ -78,6 +78,112 @@ public enum Bluetooth {
         }
     }
 
+    // MARK: Headphone status and listening mode (private API, read the comment)
+
+    /// What the AirPods menu shows and lets you change: Off / Noise Cancellation / Transparency /
+    /// Adaptive. Raw values are what bluetoothd uses for `listeningMode` (established live on
+    /// 2026-10-11: 2 is what the Apple menu calls Noise Cancellation, 3 is Off).
+    public enum ListeningMode: UInt8, CaseIterable, Sendable, Hashable {
+        case transparency = 1, noiseCancellation = 2, off = 3, adaptive = 4
+
+        public var title: String {
+            switch self {
+            case .off: return "Off"
+            case .noiseCancellation: return "Noise Cancellation"
+            case .transparency: return "Transparency"
+            case .adaptive: return "Adaptive"
+            }
+        }
+        /// The order the Apple menu lists them in.
+        public static let menuOrder: [ListeningMode] = [.off, .noiseCancellation, .transparency, .adaptive]
+    }
+
+    /// What a connected pair of Apple headphones reports about itself: the current listening mode
+    /// (nil for a device that doesn't have one), which modes it offers, and battery per part.
+    public struct HeadphoneStatus: Equatable, Sendable {
+        public var mode: ListeningMode?
+        public var modes: [ListeningMode]
+        /// Left, right, case — only the parts that report (a speaker reports one, as "left").
+        public var battery: [Int]
+    }
+
+    /// Read what bluetoothd knows about a paired device. Returns nil when there's nothing to show
+    /// (not an Apple audio device, or no status at all).
+    ///
+    /// **This is private API, and here's why it's acceptable.** There is no public way to read or
+    /// set a listening mode. What there is: IOBluetooth's device object wraps CoreBluetooth's
+    /// `CBClassicPeer`, which bluetoothd keeps *live* in every client process — mode, mode cycle,
+    /// in-ear, per-bud battery — and whose `setListeningMode:` is real code (it compares against the
+    /// current value and, if different, sends bluetoothd message 0x30), not a field store. Measured
+    /// 2026-10-11 from an unentitled process: the write lands on the AirPods within a second, the
+    /// user heard it. Everything else that could do this needs `com.apple.bluetooth.system`
+    /// (CLAUDE.md). All of it is reached by selector, so if Apple renames or removes a method the
+    /// result is a missing control in the menu, never a crash: every selector is checked first.
+    public static func headphoneStatus(address: String) -> HeadphoneStatus? {
+        guard let device = IOBluetoothDevice(addressString: address), device.isConnected(),
+              let peer = Private.peer(of: device) else { return nil }
+        let raw = Private.u8(peer, "listeningMode")
+        let mode = raw.flatMap(ListeningMode.init(rawValue:))
+        var battery: [Int] = []
+        for key in ["batteryPercentLeft", "batteryPercentRight", "batteryPercentCase"] {
+            if let v = Private.u8(peer, key), v > 0 { battery.append(Int(v)) }
+        }
+        if battery.isEmpty, let v = Private.u8(peer, "batteryPercentSingle"), v > 0 { battery.append(Int(v)) }
+        guard mode != nil || !battery.isEmpty else { return nil }
+        let modes: [ListeningMode] = mode == nil ? [] : ListeningMode.menuOrder.filter {
+            $0 != .adaptive || Private.supportsAdaptive(peer: peer)
+        }
+        return HeadphoneStatus(mode: mode, modes: modes, battery: battery)
+    }
+
+    /// Ask bluetoothd to put the device in this mode. Returns false if the ask couldn't even be
+    /// made; whether it *took* is only knowable by reading `headphoneStatus` again a moment later —
+    /// the caller does that. Call off the main thread (it's an IPC), from a process whose main run
+    /// loop is live (the XPC link to bluetoothd needs it; a cold process's first write is dropped).
+    @discardableResult
+    public static func setListeningMode(_ mode: ListeningMode, address: String) -> Bool {
+        guard let device = IOBluetoothDevice(addressString: address), device.isConnected(),
+              let peer = Private.peer(of: device) else { return false }
+        return Private.setU8(peer, "setListeningMode:", mode.rawValue)
+    }
+
+    /// The selector plumbing, kept in one place. Every call checks `responds(to:)` first.
+    private enum Private {
+        static func peer(of device: IOBluetoothDevice) -> NSObject? {
+            let sel = NSSelectorFromString("classicPeer")
+            guard device.responds(to: sel) else { return nil }
+            return device.perform(sel)?.takeUnretainedValue() as? NSObject
+        }
+
+        typealias Getter = @convention(c) (AnyObject, Selector) -> UInt
+        typealias SetterU8 = @convention(c) (AnyObject, Selector, UInt8) -> Void
+
+        /// A scalar getter, read as its low byte — these are all `unsigned char` properties.
+        static func u8(_ obj: NSObject, _ name: String) -> UInt8? {
+            let sel = NSSelectorFromString(name)
+            guard let m = class_getInstanceMethod(type(of: obj), sel),
+                  let enc = method_getTypeEncoding(m), "CcBIi".contains(Character(UnicodeScalar(UInt8(enc.pointee)))) else { return nil }
+            return UInt8(truncatingIfNeeded: unsafeBitCast(method_getImplementation(m), to: Getter.self)(obj, sel))
+        }
+
+        static func setU8(_ obj: NSObject, _ name: String, _ value: UInt8) -> Bool {
+            let sel = NSSelectorFromString(name)
+            guard let m = class_getInstanceMethod(type(of: obj), sel) else { return false }
+            unsafeBitCast(method_getImplementation(m), to: SetterU8.self)(obj, sel, value)
+            return true
+        }
+
+        /// Adaptive exists on the second-generation AirPods Pro and later. No capability bit for it
+        /// has been identified, so this is by product id; a device not listed gets the three modes
+        /// every ANC pair has.
+        static func supportsAdaptive(peer: NSObject) -> Bool {
+            let sel = NSSelectorFromString("productID")
+            guard let m = class_getInstanceMethod(type(of: peer), sel) else { return false }
+            let pid = unsafeBitCast(method_getImplementation(m), to: Getter.self)(peer, sel) & 0xffff
+            return [0x2014, 0x2024, 0x2019, 0x201f, 0x2029].contains(pid)
+        }
+    }
+
     /// Is there a Core Audio device — the `:output` or `:input` half — for this address? That, and not
     /// IOBluetooth's `isConnected()`, is what "connected" has to mean here: see `summon`.
     public static func hasAudioDevice(address: String) -> Bool {

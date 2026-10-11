@@ -42,6 +42,12 @@ final class AppModel: ObservableObject {
     /// Paired Bluetooth audio devices, for the menu's "pin a device" picker. Refreshed off the main
     /// thread when the picker opens.
     @Published private(set) var pairedBluetooth: [Bluetooth.Device] = []
+    /// What each connected pair of Apple headphones reports (listening mode, battery), by lowercased
+    /// Bluetooth address. Refreshed while the menu is open and after a mode change.
+    @Published private(set) var headphones: [String: Bluetooth.HeadphoneStatus] = [:]
+    /// Rows whose listening-mode list is folded out (lowercased addresses). Session state only.
+    @Published private(set) var modesExpanded: Set<String> = []
+    private var headphoneTimer: Timer?
     /// What a summoned Bluetooth device's row is showing, keyed by lowercased address. Lives here
     /// rather than in the row so it survives closing the menu mid-connect.
     @Published private(set) var connectState: [String: ConnectState] = [:]
@@ -187,7 +193,8 @@ final class AppModel: ObservableObject {
         var rows = devices.map {
             MenuDevice(uid: $0.uid, name: $0.name, role: role, present: true,
                        isBluetooth: $0.transport.isBluetooth, pinned: isPinned($0.uid, role),
-                       onboard: $0.transport == .builtIn, kind: bluetoothKind($0.uid))
+                       onboard: $0.transport == .builtIn, kind: bluetoothKind($0.uid),
+                       battery: Bluetooth.address(fromDeviceUID: $0.uid).flatMap { headphones[$0.lowercased()]?.battery } ?? [])
         }
         var absent: [(uid: String, name: String, pinned: Bool)] =
             pins.filter { $0.role == role }.map { ($0.uid, $0.name, true) }
@@ -427,6 +434,64 @@ final class AppModel: ObservableObject {
             awaiting[role] = nil
             Log.info("menu: \(d.name) arrived; selecting it as the \(role.rawValue)")
             if role == .output { selectOutput(d) } else { selectInput(d) }
+        }
+        refreshHeadphones()
+    }
+
+    // MARK: Headphone status (listening mode, battery)
+
+    /// The menu is open: read the headphones' status now and keep it fresh while it stays open. The
+    /// timer bounds itself, because a `.window` MenuBarExtra doesn't reliably say when it closed.
+    func menuOpened() {
+        refreshHeadphones()
+        headphoneTimer?.invalidate()
+        let started = Date()
+        headphoneTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
+            guard let self, Date().timeIntervalSince(started) < 120 else { t.invalidate(); return }
+            self.refreshHeadphones()
+        }
+    }
+
+    func menuClosed() {
+        headphoneTimer?.invalidate()
+        headphoneTimer = nil
+    }
+
+    /// Read every connected Bluetooth device's status (an IPC each, so on `queue`) and publish changes.
+    func refreshHeadphones() {
+        let addresses = Set((outputs + inputs).compactMap { Bluetooth.address(fromDeviceUID: $0.uid)?.lowercased() })
+        queue.async { [weak self] in
+            var fresh: [String: Bluetooth.HeadphoneStatus] = [:]
+            for a in addresses { if let st = Bluetooth.headphoneStatus(address: a) { fresh[a] = st } }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.headphones != fresh { self.headphones = fresh }
+            }
+        }
+    }
+
+    func toggleModes(_ key: String) {
+        if modesExpanded.contains(key) { modesExpanded.remove(key) } else { modesExpanded.insert(key); refreshHeadphones() }
+    }
+
+    /// Put the headphones in this mode. Shown at once; confirmed by reading back a second later (and
+    /// asked once more if it didn't take — bluetoothd drops a write now and then), then re-read so
+    /// the menu shows what the device actually did.
+    func setListeningMode(_ mode: Bluetooth.ListeningMode, for item: MenuDevice) {
+        guard let key = item.address?.lowercased(), var status = headphones[key] else { return }
+        status.mode = mode
+        headphones[key] = status
+        Log.info("menu: \(item.name) listening mode → \(mode.title)")
+        queue.async { [weak self] in
+            var attempts = 0
+            repeat {
+                attempts += 1
+                Bluetooth.setListeningMode(mode, address: key)
+                Thread.sleep(forTimeInterval: 1)
+            } while Bluetooth.headphoneStatus(address: key)?.mode != mode && attempts < 2
+            let got = Bluetooth.headphoneStatus(address: key)
+            if got?.mode != mode { Log.warn("menu: \(item.name) stayed in \(got?.mode?.title ?? "an unknown mode") after asking for \(mode.title) twice") }
+            Task { @MainActor in self?.refreshHeadphones() }
         }
     }
 

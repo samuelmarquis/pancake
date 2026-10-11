@@ -48,6 +48,11 @@ folds out everything already paired in Bluetooth, so you can connect (or pin) a
 device you've never pinned; pairing something *new* is still System Settings' job.
 Pins are yours to edit: `~/.config/pancake/pins.json`.
 
+**AirPods noise control.** A connected pair of Apple headphones gets a chevron on its
+row that folds out Off / Noise Cancellation / Transparency / Adaptive, like the system's
+own AirPods menu, with battery under the name. (This leans on private CoreBluetooth
+state; if a macOS update takes it away the chevron simply disappears.)
+
 ### The graph
 
 **Show graph…** opens a PipeWire-style patchbay:

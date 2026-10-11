@@ -58,7 +58,9 @@ struct MenuContent: View {
             model.refreshLaunchAtLogin()
             // Cheap, and it's what gives a Bluetooth row its real icon (earbuds vs speaker).
             model.refreshPairedBluetooth()
+            model.menuOpened()
         }
+        .onDisappear { model.menuClosed() }
     }
 
     /// Open the routing window. We're an `.accessory` app (no Dock icon), so nudge ourselves to the
@@ -143,6 +145,10 @@ private struct DeviceSection: View {
             }
             ForEach(rows) { item in
                 DeviceRow(model: model, item: item, selected: isSelected(item))
+                if let key = item.address?.lowercased(), model.modesExpanded.contains(key),
+                   let status = model.headphones[key], status.mode != nil {
+                    ListeningModeRows(model: model, item: item, status: status)
+                }
             }
 
             if picking {
@@ -287,11 +293,66 @@ private struct DeviceRow: View {
             if !item.onboard {
                 PinButton(pinned: item.pinned, showing: hover, name: item.name) { model.togglePin(item) }
             }
+            // Apple headphones with a listening mode: the chevron folds the modes out under the row.
+            if item.present, let key = item.address?.lowercased(), model.headphones[key]?.mode != nil {
+                ModeChevron(expanded: model.modesExpanded.contains(key), name: item.name) { model.toggleModes(key) }
+            }
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
         .background(RoundedRectangle(cornerRadius: 6).fill(hover ? Color.primary.opacity(0.10) : .clear))
         .onHover { hover = $0 }
+    }
+}
+
+/// Folds the listening modes (Off / Noise Cancellation / Transparency / Adaptive) out under a pair
+/// of connected Apple headphones — what the AirPods menu does with a submenu.
+private struct ModeChevron: View {
+    let expanded: Bool
+    let name: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .bold))
+                .rotationEffect(.degrees(expanded ? 0 : -90))
+                .foregroundStyle(expanded ? Color.accentColor : (hover ? Color.primary : Color.secondary))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(expanded ? Color.accentColor.opacity(0.15) : Color.clear))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(expanded ? "Hide \(name)'s noise control" : "Noise control for \(name)")
+    }
+}
+
+/// The modes a connected pair of headphones offers, one row each, the current one marked. Clicking
+/// one asks the headphones to switch; the row updates at once and is corrected if the device
+/// disagrees a second later.
+private struct ListeningModeRows: View {
+    @ObservedObject var model: AppModel
+    let item: MenuDevice
+    let status: Bluetooth.HeadphoneStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(status.modes, id: \.self) { mode in
+                MenuRow(action: { model.setListeningMode(mode, for: item) }) {
+                    HStack(spacing: 10) {
+                        Image(systemName: status.mode == mode ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 12))
+                            .frame(width: 20)
+                            .foregroundStyle(status.mode == mode ? Color.accentColor : Color.secondary)
+                        Text(mode.title).font(.system(size: 13))
+                    }
+                }
+                .help("\(item.name): \(mode.title)")
+            }
+        }
+        .padding(.leading, 36)
     }
 }
 

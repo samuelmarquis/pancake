@@ -170,6 +170,21 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   output it's already trying to play to and only while audio is playing (`attemptBluetoothReconnect`,
   on a timer); anything the *user* clicks is the menu's ask (`AppModel.connect`), which also selects
   the device once the HAL lists it (`awaiting`) and shows connecting/unreachable on the row.
+- **Noise control (listening mode) and battery for Apple headphones — private API, deliberately
+  (2026-10-11).** There is no public API for any of it. IOBluetooth's device object wraps
+  CoreBluetooth's `CBClassicPeer`, which bluetoothd keeps live in every client — no entitlement —
+  with `listeningMode`, `listeningModeConfigs` (the stem-cycle bitmask: bit n−1 ↔ mode n), per-bud
+  battery, in-ear, product id; and its `setListeningMode:` is real code (compares, then sends
+  bluetoothd message 0x30), which *lands on the AirPods* from an unentitled process (user heard it).
+  The wrapper's own `-[IOBluetoothDevice listeningMode]`/`setListeningMode:` are a stale ivar and a
+  plain store — useless. Mode numbering, established by ear: **1 Transparency, 2 Noise Cancellation,
+  3 Off, 4 Adaptive.** Adaptive is offered by product id (no capability bit found). Gotcha: a write
+  issued before the process's XPC link to bluetoothd is up is silently dropped (a cold CLI process
+  writing at launch did nothing; after 1.5 s of run loop it worked) — the app writes from `queue`
+  with a live main run loop, reads back after 1 s and asks once more if it didn't take. All access is
+  by checked selector (`Bluetooth.Private`), so an SDK change degrades to "no control", not a crash.
+  Menu: a chevron on a connected AirPods row folds the modes out as radio rows; status is polled
+  every second while the menu is open (`menuOpened`, self-bounded at 120 s).
 - **Pinned devices** — `Sources/PancakeApp/PinnedDevices.swift`, `~/.config/pancake/pins.json`. Rows the
   menu keeps whether or not the device is connected, so an absent Bluetooth device is still a button
   that fetches it (including back off a phone). *Not* in `graph.json`: pins aren't routing, and that
