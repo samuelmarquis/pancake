@@ -145,7 +145,7 @@ private struct DeviceSection: View {
             }
             ForEach(rows) { item in
                 DeviceRow(model: model, item: item, selected: isSelected(item))
-                if let key = item.address?.lowercased(), model.modesExpanded.contains(key),
+                if role == .output, let key = item.address?.lowercased(), model.modesExpanded.contains(key),
                    let status = model.headphones[key], status.mode != nil {
                     ListeningModeRows(model: model, item: item, status: status)
                 }
@@ -294,7 +294,8 @@ private struct DeviceRow: View {
                 PinButton(pinned: item.pinned, showing: hover, name: item.name) { model.togglePin(item) }
             }
             // Apple headphones with a listening mode: the chevron folds the modes out under the row.
-            if item.present, let key = item.address?.lowercased(), model.headphones[key]?.mode != nil {
+            // Once, under the Output row — the same AirPods' Input row would just repeat it.
+            if item.present, item.role == .output, let key = item.address?.lowercased(), model.headphones[key]?.mode != nil {
                 ModeChevron(expanded: model.modesExpanded.contains(key), name: item.name) { model.toggleModes(key) }
             }
         }

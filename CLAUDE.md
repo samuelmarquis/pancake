@@ -183,7 +183,7 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   writing at launch did nothing; after 1.5 s of run loop it worked) — the app writes from `queue`
   with a live main run loop, reads back after 1 s and asks once more if it didn't take. All access is
   by checked selector (`Bluetooth.Private`), so an SDK change degrades to "no control", not a crash.
-  Menu: a chevron on a connected AirPods row folds the modes out as radio rows; status is polled
+  Menu: a chevron on a connected AirPods *Output* row (not the Input twin) folds the modes out as radio rows; status is polled
   every second while the menu is open (`menuOpened`, self-bounded at 120 s).
 - **Pinned devices** — `Sources/PancakeApp/PinnedDevices.swift`, `~/.config/pancake/pins.json`. Rows the
   menu keeps whether or not the device is connected, so an absent Bluetooth device is still a button
