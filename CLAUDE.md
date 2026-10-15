@@ -275,6 +275,20 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
   sample-exact unit test (`RecorderRingTests`) that pumps known audio through `pk_ioproc` and reads it
   back. In the UI: add a Recorder node, wire a source in, hit record.
 
+- **Dark wakes stop IO; that is not a fault (2026-10-14).** A sleeping Mac wakes for maintenance
+  every ~15 min with the display off, coreaudiod keeps the hardware parked, and the aggregate doesn't
+  cycle for the ~45 s it lasts. The watchdog used to force a rebuild every 10 s of every dark wake
+  (28,091 "IO has not cycled" rebuilds in the log before the fix; one sat in a blocked HAL call for
+  8½ min when the machine slept mid-call). Now a stall while `SystemDisplay.isAsleep`
+  (`CGDisplayIsAsleep`, PancakeCore links CoreGraphics for it) is logged once and waited out; IO
+  resumes by itself on the real wake (seen: an aggregate built 7 s before a sleep was cycling 2 s
+  after the lid opened). A stall with the display *awake* still rebuilds after two checks.
+- **Quitting never re-pins the hub (2026-10-14).** Listener removal doesn't recall callbacks already
+  dispatched onto `queue`: the hand-back in `Engine.stop` moved the default output, the resulting
+  `defaultOutputChanged` landed ~8 ms later, and the stopped engine pinned the default output back to
+  the hub — Mac left on a silent virtual device (seen 2026-10-13). `Engine.halted` is set first thing
+  in `stop()`; `handle`, `scheduleRebuild`, `rebuild` and `recompileMatrix` all check it. Verified:
+  the three late callbacks log "(after stop; ignored)" and the speakers stay the default.
 - **What running costs when nothing is playing, measured 2026-10-01.** The engine's IO never stops,
   and coreaudiod pays for it: 1.6% with no pancake, 9.8% for an aggregate of *just the built-in
   speakers* (the speaker DSP runs whenever the speakers do), 11.4% adding the built-in mic, 14.9%
@@ -335,12 +349,23 @@ ever need to bounce coreaudiod by hand, use the two-name `killall`.
    (its legend drops out when the window is narrow); the window opens fitting a tidied graph and shrinks
    much smaller. Remaining polish if wanted: zoom, multi-select, marquee.
 
-7. **Idle the IO in silence — deferred by the owner (2026-10-01), revisit only if it becomes a
-   problem.** Always-on IO costs coreaudiod ~13% of a core at idle and blocks idle system sleep
-   (numbers under "Verified on this machine"). The owner runs `caffeinate` anyway, so neither bites
-   today. Signs it has started to matter: battery complaints, the Mac not sleeping on a machine
-   without `caffeinate`, or coreaudiod's idle share climbing past the measured ~14%. The design is
-   sketched in that same note; the cost is a start-up gap on the first sound after silence.
+7. **Idle the IO in silence — declined by the owner (2026-10-14); do not build it unasked.** Always-on
+   IO costs coreaudiod ~13% of a core at idle and blocks idle system sleep (numbers under "Verified
+   on this machine"). A battery complaint on 2026-10-13 reopened it (`BATTERY-DRAIN.md` is the
+   investigation; the acute drain was mostly a Finder/IconServices runaway, pancake's share is the
+   steady ~14%), and the owner's answer was no: **the laptop plays live music, and an engine that
+   stops and starts IO on its own judgement is "spooky behaviour that can cause me to fumble a set".**
+   The sleep assertion is moot on this machine (`caffeinate` is always running). What *was* done
+   instead, both with no change in semantics: the quit race (stale `defaultOutputChanged` re-pinning
+   the hub after the hand-back — `Engine.halted`) and the dark-wake rebuild storm (`SystemDisplay`,
+   under "Verified"). Options still on the table if the battery matters again, all deterministic:
+   a manual **Pause routing** menu item (off by default, never automatic); a user-chosen IO buffer
+   size (the 14% is partly per-cycle overhead at 94 callbacks/s — unmeasured); dropping the built-in
+   mic from the aggregate when nothing reads Pancake Mic (~1.6%). The automatic design, if it is
+   ever wanted: demand = a path in the effective graph from a live source (a process running output
+   on the hub — `kAudioProcessPropertyIsRunningOutput` *does* notify, with `Devices` always empty in
+   practice; an input device; a tapped app playing) to a live sink (an output device; an armed
+   recorder; the mic/program with a process running input on it); the first-sound gap is the price.
 
    Deliberately NOT done — **plugin (AU/VST/CLAP) inserts in the graph.** It would break invariant #3:
    the IOProc is pure C gain-routing plus our own DSP (no alloc/locks/ObjC/Swift), and hosting a plugin

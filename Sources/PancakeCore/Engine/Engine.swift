@@ -118,6 +118,7 @@ public final class Engine {
     public func start() {
         queue.async { [self] in
             guard monitor == nil else { return }
+            halted = false
             do {
                 monitor = try HardwareMonitor(queue: queue) { [weak self] event in self?.handle(event) }
             } catch {
@@ -142,6 +143,13 @@ public final class Engine {
     /// feeding, so stopping pancake never leaves the system on a silent virtual device.
     public func stop() {
         queue.sync { [self] in
+            // First, before anything else: HAL callbacks already dispatched onto `queue` run *after*
+            // this block, listener removal or not. Seen 2026-10-13: the hand-back below moved the
+            // default output to the speakers, the resulting `defaultOutputChanged` arrived a few ms
+            // later, and the stopped engine pinned the default output straight back to the hub —
+            // leaving the Mac on a silent virtual device with no engine behind it. Everything that
+            // could rebuild or re-pin checks this flag.
+            halted = true
             pendingRebuild?.cancel()
             pendingRebuild = nil
             signalTimer?.cancel()
@@ -405,6 +413,9 @@ public final class Engine {
     private let rt: OpaquePointer
     private var desiredGraph: Graph
     private var currentState: State = .stopped
+    /// Set at the top of `stop()`, cleared by `start()`: after it, nothing rebuilds, re-pins or
+    /// re-routes, however late a HAL callback or a queued graph change arrives (see `stop`).
+    private var halted = false
     private var monitor: HardwareMonitor?
     private var pendingRebuild: DispatchWorkItem?
 
@@ -422,6 +433,8 @@ public final class Engine {
     private var watchdog: DispatchSourceTimer?
     private var watchdogLastCycles: UInt64 = 0
     private var watchdogStalls = 0
+    /// IO stopped cycling while the display was asleep — a dark wake, logged once, not a fault.
+    private var watchdogStallWhileDark = false
     private var overloadListener: PropertyListener?
     /// Live process taps, keyed by bundle id. Created/destroyed on rebuild; reused across them.
     private var taps: [String: ProcessTap] = [:]
@@ -489,6 +502,7 @@ public final class Engine {
     }
 
     private func scheduleRebuild(reason: String, delay: TimeInterval? = nil) {
+        guard !halted else { Log.debug("rebuild (\(reason)) requested after stop; ignored"); return }
         let now = Date()
         pendingRebuild?.cancel()
         // An explicit delay restarts the window (its minimum must not be cut short by an older request).
@@ -510,6 +524,7 @@ public final class Engine {
     // MARK: HAL events
 
     private func handle(_ event: HardwareMonitor.Event) {
+        guard !halted else { Log.debug("hal: \(event) (after stop; ignored)"); return }
         Log.debug("hal: \(event)")
         switch event {
         case .devicesChanged:
@@ -910,6 +925,7 @@ public final class Engine {
     }
 
     private func rebuild(force: Bool = false) {
+        guard !halted else { Log.debug("rebuild after stop; ignored"); return }
         tapRebuildPendingFor.removeAll()
         checkHALHealth()
         let devices = AudioDevice.all(includeHidden: true)
@@ -1044,6 +1060,7 @@ public final class Engine {
 
     /// Gains changed but topology didn't: recompile against the existing layout and swap.
     private func recompileMatrix(reason: String) {
+        guard !halted else { return }
         guard let layout, case .running(let info) = currentState else {
             scheduleRebuild(reason: reason)
             return
@@ -1087,15 +1104,33 @@ public final class Engine {
         Log.debug("health: cycles=\(cycles) (+\(cycles &- watchdogLastCycles)) hub=\(String(format: "%.3f", hubPeak)) agg=\(agg.id) running=\(aggRunning) subs=\(agg.fullSubDeviceList.count) | \(outs.joined(separator: "; "))")
 
         if cycles == watchdogLastCycles {
-            watchdogStalls += 1
-            if watchdogStalls >= 2 {
-                Log.warn("watchdog: IO has not cycled for \(watchdogStalls) checks; rebuilding")
+            if SystemDisplay.isAsleep {
+                // A dark wake: every ~15 min the sleeping Mac wakes for maintenance with the display
+                // off, coreaudiod keeps the hardware parked, and IO doesn't cycle for the 45 s it lasts.
+                // Not a fault — IO comes back by itself on the real wake (seen 2026-10-14: an aggregate
+                // built 7 s before a sleep was cycling 2 s after the lid opened). Treating it as one
+                // meant a forced rebuild every 10 s of every dark wake for weeks (28,091 of them in
+                // the log), and one of those rebuilds sat inside a blocked HAL call for 8½ minutes
+                // when the machine went back to sleep mid-call.
+                if !watchdogStallWhileDark {
+                    Log.info("watchdog: IO isn't cycling and the display is asleep (dark wake); waiting for the wake rather than rebuilding")
+                    watchdogStallWhileDark = true
+                }
                 watchdogStalls = 0
-                rebuild(force: true)
-                return
+            } else {
+                watchdogStalls += 1
+                if watchdogStalls >= 2 {
+                    Log.warn("watchdog: IO has not cycled for \(watchdogStalls) checks; rebuilding")
+                    watchdogStalls = 0
+                    watchdogStallWhileDark = false
+                    rebuild(force: true)
+                    return
+                }
             }
         } else {
+            if watchdogStallWhileDark { Log.info("watchdog: IO is cycling again after the dark wake (no rebuild needed)") }
             watchdogStalls = 0
+            watchdogStallWhileDark = false
         }
         watchdogLastCycles = cycles
 

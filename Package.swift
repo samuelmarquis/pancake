@@ -24,7 +24,7 @@ let package = Package(
         .target(
             name: "PancakeCore",
             dependencies: ["CPancakeRT"],
-            linkerSettings: [.linkedFramework("CoreAudio"), .linkedFramework("IOBluetooth")]
+            linkerSettings: [.linkedFramework("CoreAudio"), .linkedFramework("IOBluetooth"), .linkedFramework("CoreGraphics")]
         ),
         // The menu bar app. Built as a bare executable by SwiftPM; `make app` wraps it in a bundle.
         .executableTarget(
